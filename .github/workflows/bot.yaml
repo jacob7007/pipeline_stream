@@ -1,0 +1,41 @@
+name: Telegram Bot Listener
+
+on:
+  workflow_dispatch:
+    # Allow API triggers from cron-job.org every 1 minute
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+        cache: 'pip'
+
+    - name: Install Dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+
+    - name: Run Telegram Bot Coordinator
+      env:
+        GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+        BLOGGER_REFRESH_TOKEN: ${{ secrets.BLOGGER_REFRESH_TOKEN }}
+        BLOGGER_CLIENT_ID: ${{ secrets.BLOGGER_CLIENT_ID }}
+        BLOGGER_CLIENT_SECRET: ${{ secrets.BLOGGER_CLIENT_SECRET }}
+        OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        SCRAPING_PROXY: ${{ secrets.SCRAPING_PROXY }}
+        TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        TELEGRAM_ALLOWED_CHAT_IDS: ${{ secrets.TELEGRAM_ALLOWED_CHAT_IDS }}
+        BLOG_PLAYER_ID: ${{ secrets.BLOG_PLAYER_ID }}
+        BLOG_DATA_ID: ${{ secrets.BLOG_DATA_ID }}
+        DATA_PAGE_ID: ${{ secrets.DATA_PAGE_ID }}
+        SCRAPER_URLS: ${{ secrets.SCRAPER_URLS }}
+      run: |
+        python telegram_bot.py

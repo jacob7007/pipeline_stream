@@ -1,0 +1,6 @@
+requests
+gspread
+google-auth
+google-auth-oauthlib
+beautifulsoup4
+cryptography
