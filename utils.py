@@ -226,6 +226,40 @@ def parse_user_styled_time(time_str: str) -> datetime:
 
     return datetime.min
 
+
+def is_match_expired(kickoff_time: str | datetime, duration: int | str, now_dt: datetime, grace_minutes: int = 180) -> bool:
+    """
+    Returns True if the current time is at or past the match expiration time (Kickoff + Duration + Grace Period).
+    """
+    if not kickoff_time:
+        return False
+    dt = kickoff_time if isinstance(kickoff_time, datetime) else parse_user_styled_time(kickoff_time)
+    if dt == datetime.min:
+        return False
+    try:
+        duration_mins = int(duration) if duration else 180
+    except (ValueError, TypeError):
+        duration_mins = 180
+    expiry_dt = dt + timedelta(minutes=duration_mins + grace_minutes)
+    return now_dt >= expiry_dt
+
+
+def is_match_ended(kickoff_time: str | datetime, duration: int | str, now_dt: datetime) -> bool:
+    """
+    Returns True if the match has passed its scheduled duration (Kickoff + Duration).
+    """
+    if not kickoff_time:
+        return False
+    dt = kickoff_time if isinstance(kickoff_time, datetime) else parse_user_styled_time(kickoff_time)
+    if dt == datetime.min:
+        return False
+    try:
+        duration_mins = int(duration) if duration else 180
+    except (ValueError, TypeError):
+        duration_mins = 180
+    end_dt = dt + timedelta(minutes=duration_mins)
+    return now_dt >= end_dt
+
 def get_status_priority(status: str) -> int:
     """Returns numeric priority for match status. Higher value = higher priority."""
     if status == "live":

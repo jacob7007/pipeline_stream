@@ -17,6 +17,8 @@ from utils import (
     format_to_human_time,
     get_event_display_name,
     resolve_timezone,
+    is_match_expired,
+    is_match_ended,
     DEFAULT_HEADERS,
 )
 
@@ -154,8 +156,8 @@ def _build_match_event(match_data: dict, team_translations: dict, matches_cache:
     match_url = match_data["match_url"]
     cached_match = matches_cache.get(event_id) if event_id else None
     status_class = match_data["status_class"]
-    # Only force finished if explicitly marked manually by user via Telegram
-    if cached_match and cached_match.get("status_class") in ["finished", "manually-finished"]:
+    # Only force finished if explicitly marked finished by user via Telegram
+    if cached_match and cached_match.get("status_class") == "finished":
         status_class = "finished"
 
     kickoff_dt = datetime.min
@@ -187,7 +189,7 @@ def _build_match_event(match_data: dict, team_translations: dict, matches_cache:
     team1_img = match_data["team1_orig_img"] or t1_info.get("logo_url", "")
     team2_img = match_data["team2_orig_img"] or t2_info.get("logo_url", "")
 
-    is_ended = status_class in ["finished", "manually-finished"]
+    is_ended = status_class == "finished"
     existing_links = "" if is_ended else (cached_match.get("links", "") if cached_match else "")
 
     event = {
@@ -248,6 +250,24 @@ def _process_matches(matches_to_process: list, team_translations: dict, matches_
                     if existing_status == "live" and entry.get("status_class") != "live":
                         continue
                 updated_matches_cache[ev_id] = entry
+
+    # Retain matches from previous cache that disappeared from competitor sources but haven't expired (3h post-match TTL)
+    if matches_cache:
+        for ev_id, cached_entry in matches_cache.items():
+            if ev_id not in updated_matches_cache:
+                k_time = cached_entry.get("kickoff_time", "")
+                duration = int(cached_entry.get("duration", 180))
+                if is_match_expired(k_time, duration, now_dt, grace_minutes=180):
+                    continue
+
+                retained_entry = dict(cached_entry)
+                # If match duration has passed or it was marked finished, ensure it stays finished and link is cleared
+                if retained_entry.get("status_class") == "finished" or is_match_ended(k_time, duration, now_dt):
+                    retained_entry["status_class"] = "finished"
+                    retained_entry["is_ended"] = True
+                    retained_entry["links"] = ""
+
+                updated_matches_cache[ev_id] = retained_entry
 
     return parsed_matches, updated_matches_cache
 

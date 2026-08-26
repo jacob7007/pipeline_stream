@@ -4,7 +4,7 @@ from datetime import datetime
 import gspread
 from google.oauth2.service_account import Credentials
 import logger
-from utils import format_to_human_time, parse_user_styled_time, get_now_local, resolve_timezone
+from utils import format_to_human_time, parse_user_styled_time, get_now_local, resolve_timezone, is_match_expired
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
@@ -69,7 +69,7 @@ def check_sheets_status(client: gspread.Client, spreadsheet_name: str) -> tuple[
 
 
 def get_gspread_client() -> gspread.Client:
-    """Authenticates and returns a gspread client."""
+    """Authenticates and returns a gspread client using environment variables."""
     sa_json_str = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
     if sa_json_str:
         try:
@@ -84,22 +84,9 @@ def get_gspread_client() -> gspread.Client:
         creds = Credentials.from_service_account_file(sa_file_path, scopes=SCOPES)
         return gspread.authorize(creds)
 
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    parent_dir = os.path.dirname(script_dir)
-    fallback_paths = [
-        "service_account.json", "google_sheets_token.json",
-        os.path.join(script_dir, "service_account.json"),
-        os.path.join(script_dir, "google_sheets_token.json"),
-        os.path.join(parent_dir, "service_account.json"),
-        os.path.join(parent_dir, "google_sheets_token.json")
-    ]
-    for path in fallback_paths:
-        if os.path.exists(path):
-            creds = Credentials.from_service_account_file(path, scopes=SCOPES)
-            return gspread.authorize(creds)
-
-    raise FileNotFoundError(
-        "Google Service Account credentials not found. Please set GOOGLE_SERVICE_ACCOUNT_JSON."
+    raise ValueError(
+        "Google Service Account credentials not found in environment variables. "
+        "Please set GOOGLE_SERVICE_ACCOUNT_JSON in .env."
     )
 
 
@@ -240,7 +227,7 @@ def fetch_matches_cache(client, spreadsheet_name: str = "Streaming Dashboard") -
         if is_ended_raw:
             is_ended = is_ended_raw in ["true", "1", "yes"]
         else:
-            is_ended = s_class in ["finished", "manually-finished"]
+            is_ended = s_class == "finished"
 
         l_updated = padded_row[header_map["last_updated"]].strip() if "last_updated" in header_map else ""
 
@@ -276,15 +263,17 @@ def fetch_matches_cache(client, spreadsheet_name: str = "Streaming Dashboard") -
 
 
 def _filter_valid_cache_rows(matches_cache: dict, now: datetime, now_local_str: str) -> list:
-    """Filters out matches older than 2 days and formats 13-column rows for cache sheet."""
+    """Filters out matches expired 3 hours after scheduled end and formats 13-column rows for cache sheet."""
     valid_cache_rows = []
     for event_id, data in matches_cache.items():
-        last_updated_str = data.get("last_updated", "")
-        if last_updated_str:
-            last_updated_dt = parse_user_styled_time(last_updated_str)
-            if last_updated_dt != datetime.min and (now - last_updated_dt).days >= 2:
-                continue
+        k_time = data.get("kickoff_time", "")
+        duration = int(data.get("duration", 180))
 
+        # Check if match has passed its 3-hour post-game retention window
+        if is_match_expired(k_time, duration, now, grace_minutes=180):
+            continue
+
+        last_updated_str = data.get("last_updated", "")
         out_time_str = now_local_str
         if last_updated_str:
             try:
@@ -294,9 +283,8 @@ def _filter_valid_cache_rows(matches_cache: dict, now: datetime, now_local_str: 
                 logger.warning(f"Sheets: Failed to parse cache time '{last_updated_str}': {e}")
                 out_time_str = now_local_str
 
-        duration = int(data.get("duration", 180))
         status_class = data.get("status_class", "not-started")
-        is_ended = bool(data.get("is_ended", data.get("ended", status_class in ["finished", "manually-finished"])))
+        is_ended = bool(data.get("is_ended", data.get("ended", status_class == "finished")))
 
         row = [
             data.get("event_id", event_id),
@@ -327,7 +315,7 @@ def save_matches_cache(client, matches_cache: dict, spreadsheet_name: str = "Str
     except gspread.exceptions.WorksheetNotFound:
         worksheet = sh.add_worksheet(title=sheet_name, rows="1000", cols="13")
 
-    now = datetime.now()
+    now = get_now_local()
     now_local = get_now_local()
     now_local_str = format_to_human_time(now_local.replace(tzinfo=resolve_timezone(None)).isoformat())
 
@@ -337,6 +325,16 @@ def save_matches_cache(client, matches_cache: dict, spreadsheet_name: str = "Str
     try:
         all_values = worksheet.get_all_values()
         if all_values and len(all_values) > 1:
+            headers = [h.strip().lower() for h in all_values[0]]
+            header_map = {h: idx for idx, h in enumerate(headers)}
+            ev_idx = header_map.get("event_id", 0)
+            existing_event_ids = {row[ev_idx].strip() for row in all_values[1:] if len(row) > ev_idx and row[ev_idx].strip()}
+            current_event_ids = {r[0] for r in valid_cache_rows}
+            removed_ids = existing_event_ids - current_event_ids
+            if removed_ids:
+                count = len(removed_ids)
+                logger.info(f"Cache: Remove {count} expired match{'es' if count != 1 else ''} from cache.")
+
             existing_rows_data = [
                 [str(cell).strip() for cell in row[:12]]
                 for row in all_values[1:]

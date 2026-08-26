@@ -104,14 +104,20 @@ def _evaluate_matched_slots(active_matched: list, scraped_map: dict, actions: li
 def reconcile_state(sheet_slots: list, scraped_events: list) -> list:
     """
     Compares the Google Sheet slot states with the scraped live events.
-    Limits candidate events to the available slot capacity.
+    Limits candidate events to the available slot capacity, excluding finished matches.
     Returns a list of action dicts describing what updates to make to the sheet and Blogger.
     """
     if not sheet_slots:
         return []
 
+    # Only active/upcoming matches should occupy stream slots
+    active_candidates = [
+        e for e in scraped_events
+        if e.get("status_class") != "finished"
+    ]
+
     # Limit candidate events strictly to available physical slot capacity
-    target_events = scraped_events[:len(sheet_slots)]
+    target_events = active_candidates[:len(sheet_slots)]
     scraped_map = {e["event_id"]: e for e in target_events}
     active_matched, to_be_freed, already_free = _categorize_sheet_slots(sheet_slots, scraped_map)
 

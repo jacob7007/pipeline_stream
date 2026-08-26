@@ -44,7 +44,7 @@ def assemble_matches_feed(matches_cache: dict) -> list[dict]:
 
         duration = int(match.get("duration", 180))
         status_class = match.get("status_class", "not-started")
-        is_ended = bool(match.get("is_ended", match.get("ended", status_class in ["finished", "manually-finished"])))
+        is_ended = bool(match.get("is_ended", match.get("ended", status_class == "finished")))
         link = "" if is_ended else (match.get("links", "") or match.get("link", ""))
 
         feed_list.append({
@@ -173,7 +173,7 @@ def _update_matches_cache_links(scraped_events: list, matches_cache: dict, updat
                         pass
 
             matches_cache[ev_id]["links"] = permalink_url
-            matches_cache[ev_id]["is_ended"] = ev.get("status_class") in ["finished", "manually-finished"]
+            matches_cache[ev_id]["is_ended"] = ev.get("status_class") == "finished"
 
 
 def run(

@@ -1,27 +1,30 @@
-# Byte-compiled / optimized / DLL files
+# Byte-compiled / cache files
 __pycache__/
 *.py[cod]
 *$py.class
+*.pyc
 
-# Google & Blogger credentials/token secrets (CRITICAL)
-*token.json
-*client_secret.json
-service_account.json
-credentials.json
-Pipeline/*token.json
-Pipeline/*client_secret.json
-Pipeline/service_account.json
-Pipeline/credentials.json
+# Google credentials / token
+*token*.json
+*client_secret*.json
+service_account*.json
+credentials*.json
 
-# Local env / IDE configs
+# Environment variables
 .env
+.env.*
+*.env
+
+# Virtual environments
 .venv/
 venv/
 env/
+ENV/
+
+# IDE & Editor configs
 .vscode/
 .idea/
 .agents/
-
-# Test files
-test_pipeline_units.py
-
+*.swp
+*.swo
+*~
