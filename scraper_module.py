@@ -14,6 +14,7 @@ from utils import (
     broadcast_telegram,
     strip_timezone,
     parse_match_time,
+    parse_user_styled_time,
     format_to_human_time,
     get_event_display_name,
     resolve_timezone,
@@ -70,6 +71,103 @@ def generate_stable_event_id(t1_code: str, t2_code: str, kickoff_iso: str) -> st
     else:
         date_part = "26-00-00"
     return f"{c1}-vs-{c2}-{date_part}"
+
+
+def migrate_matches_cache_translations(matches_cache: dict, team_translations: dict, slots: list = None) -> dict:
+    """
+    Re-evaluates cached match entries against the latest team translations.
+    Updates event IDs, team names, and logo URLs if teams were previously Unknown or had placeholder codes.
+    Merges duplicate entries and updates assigned slot event IDs in-place.
+    """
+    if not matches_cache or not team_translations:
+        return matches_cache
+
+    slots = slots or []
+    migrated_count = 0
+
+    for old_event_id, cached_match in list(matches_cache.items()):
+        t1_ar = cached_match.get("team1_ar", "").strip()
+        t2_ar = cached_match.get("team2_ar", "").strip()
+        if not t1_ar and not t2_ar:
+            continue
+
+        t1_info = find_existing_translation(t1_ar, team_translations) if t1_ar else None
+        t2_info = find_existing_translation(t2_ar, team_translations) if t2_ar else None
+
+        t1_en = t1_info.get("nameEn", "") if t1_info else cached_match.get("team1_en", "")
+        t2_en = t2_info.get("nameEn", "") if t2_info else cached_match.get("team2_en", "")
+        t1_code = t1_info.get("code", "###") if t1_info else "###"
+        t2_code = t2_info.get("code", "###") if t2_info else "###"
+        t1_img = t1_info.get("logo_url") if (t1_info and t1_info.get("logo_url")) else cached_match.get("team1_img", "")
+        t2_img = t2_info.get("logo_url") if (t2_info and t2_info.get("logo_url")) else cached_match.get("team2_img", "")
+
+        raw_k_time = str(cached_match.get("kickoff_time", "")).strip()
+        kickoff_iso = ""
+        if raw_k_time:
+            try:
+                dt = parse_user_styled_time(raw_k_time)
+                if dt != datetime.min:
+                    kickoff_iso = dt.isoformat()
+            except Exception:
+                kickoff_iso = ""
+
+        if not kickoff_iso:
+            date_match = re.search(r'(\d{2})-(\d{2})-(\d{2})$', old_event_id)
+            if date_match:
+                yy, mm, dd = date_match.groups()
+                kickoff_iso = f"20{yy}-{mm}-{dd}"
+
+        new_event_id = generate_stable_event_id(t1_code, t2_code, kickoff_iso)
+
+        name_changed = (t1_en != cached_match.get("team1_en")) or (t2_en != cached_match.get("team2_en"))
+        id_changed = (new_event_id != old_event_id)
+        img_changed = (t1_img != cached_match.get("team1_img")) or (t2_img != cached_match.get("team2_img"))
+
+        if not name_changed and not id_changed and not img_changed:
+            continue
+
+        t1_display = t1_en or t1_ar
+        t2_display = t2_en or t2_ar
+        new_event_name = f"{t1_display} vs {t2_display}" if (t1_display and t2_display) else new_event_id
+
+        cached_match["event_id"] = new_event_id
+        cached_match["event_name"] = new_event_name
+        cached_match["team1_en"] = t1_en
+        cached_match["team2_en"] = t2_en
+        if t1_img:
+            cached_match["team1_img"] = t1_img
+        if t2_img:
+            cached_match["team2_img"] = t2_img
+
+        if id_changed:
+            if new_event_id in matches_cache:
+                # Merge into existing target entry if duplicate already exists
+                existing = matches_cache[new_event_id]
+                if not existing.get("links") and cached_match.get("links"):
+                    existing["links"] = cached_match["links"]
+                del matches_cache[old_event_id]
+                logger.info(f"Translation: Merged duplicate match '{old_event_id}' into '{new_event_id}' ({new_event_name})")
+            else:
+                matches_cache[new_event_id] = cached_match
+                del matches_cache[old_event_id]
+                logger.info(f"Translation: Migrated match cache ID '{old_event_id}' -> '{new_event_id}' ({new_event_name})")
+
+            # Update matching slot references so stream slots don't get displaced
+            for slot in slots:
+                if slot.get("event_id") == old_event_id:
+                    slot["event_id"] = new_event_id
+                    slot["event_name"] = new_event_name
+                    slot_name = slot.get("slot") or f"#{slot.get('row_num', '')}"
+                    logger.info(f"Slots: Updated slot {slot_name} event ID to '{new_event_id}'")
+
+            migrated_count += 1
+        else:
+            matches_cache[old_event_id] = cached_match
+
+    if migrated_count > 0:
+        logger.success(f"Translation: Migrated/cleaned {migrated_count} match cache entries with updated translations.")
+
+    return matches_cache
 
 
 def _fetch_single_url_matches(url: str, source_tz, clean_url: str, max_url_len: int) -> tuple[list, str]:
@@ -174,13 +272,15 @@ def _build_match_event(match_data: dict, team_translations: dict, matches_cache:
         if time_until_kickoff > 1 * 3600:
             is_far_future = True
 
-    channels = resolve_match_channels(
-        match_url=match_url,
-        status_class=status_class,
-        is_far_future=is_far_future,
-        plugin_name=match_data.get("plugin", ""),
-        proxies=proxies
-    )
+    channels = []
+    if status_class != "finished" and match_url:
+        channels = resolve_match_channels(
+            match_url=match_url,
+            status_class=status_class,
+            is_far_future=is_far_future,
+            plugin_name=match_data.get("plugin", ""),
+            proxies=proxies
+        )
 
     team1_en = t1_info.get("nameEn", "")
     team1_ar = t1_info.get("primary_arabic") or match_data["team1_name"]
@@ -261,8 +361,8 @@ def _process_matches(matches_to_process: list, team_translations: dict, matches_
                     continue
 
                 retained_entry = dict(cached_entry)
-                # If match duration has passed or it was marked finished, ensure it stays finished and link is cleared
-                if retained_entry.get("status_class") == "finished" or is_match_ended(k_time, duration, now_dt):
+                # If match duration has passed (~135 min realistic duration) or it was marked finished, ensure it stays finished and link is cleared
+                if retained_entry.get("status_class") == "finished" or is_match_ended(k_time, min(duration, 135), now_dt):
                     retained_entry["status_class"] = "finished"
                     retained_entry["is_ended"] = True
                     retained_entry["links"] = ""
@@ -272,7 +372,7 @@ def _process_matches(matches_to_process: list, team_translations: dict, matches_
     return parsed_matches, updated_matches_cache
 
 
-def scrape_live_matches(team_translations: dict = None, matches_cache: dict = None) -> tuple:
+def scrape_live_matches(team_translations: dict = None, matches_cache: dict = None, slots: list = None) -> tuple:
     if team_translations is None:
         team_translations = {}
     if matches_cache is None:
@@ -301,10 +401,14 @@ def scrape_live_matches(team_translations: dict = None, matches_cache: dict = No
     logger.success("Translation: Translation completed.")
     print()
 
+    # Re-evaluate cached matches & slots with updated translations and purge duplicate IDs
+    migrate_matches_cache_translations(matches_cache, team_translations, slots)
+
     now_dt = get_now_local()
     parsed_matches, updated_matches_cache = _process_matches(
         matches_to_process, team_translations, matches_cache, now_dt, get_request_proxies()
     )
 
     return parsed_matches, new_translations_list, updated_matches_cache, alias_updates
+
 

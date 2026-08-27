@@ -74,9 +74,10 @@ def _handle_end_command(arg: str, chat_id: int, bot_token: str, spreadsheet_name
 
     team_translations = translation_manager.load_team_translations(clients["sheets"], spreadsheet_name)
     matches_cache = sheets_module.fetch_matches_cache(clients["sheets"], spreadsheet_name)
+    slots = sheets_module.fetch_all_slots(clients["sheets"], spreadsheet_name)
 
     scraped_events, _, _, _ = scraper_module.scrape_live_matches(
-        team_translations=team_translations, matches_cache=matches_cache
+        team_translations=team_translations, matches_cache=matches_cache, slots=slots
     )
 
     found_match = _find_matching_event(scraped_events, arg)
@@ -166,7 +167,7 @@ def _handle_match_command(chat_id: int, bot_token: str, spreadsheet_name: str, b
     matches_cache = sheets_module.fetch_matches_cache(clients["sheets"], spreadsheet_name)
 
     scraped_events, _, _, _ = scraper_module.scrape_live_matches(
-        team_translations=team_translations, matches_cache=matches_cache
+        team_translations=team_translations, matches_cache=matches_cache, slots=slots
     )
 
     try:

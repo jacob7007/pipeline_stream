@@ -162,7 +162,7 @@ def _log_reconciliation_summary(slot_actions: list, restored_slots: list, all_ch
 def run(
     blogger_session,
     valid_slots: list,
-    invalid_slots: list,
+    newly_invalid_slots: list,
     restored_slots: list,
     scraped_events: list,
     blog_id: str,
@@ -175,7 +175,7 @@ def run(
     try:
         active_stream_events = [e for e in scraped_events if e.get("channels") and e.get("status_class") in ["live", "not-started"]]
         slot_actions = reconciler.reconcile_state(valid_slots, active_stream_events)
-        _append_invalid_actions(slot_actions, invalid_slots, restored_slots)
+        _append_invalid_actions(slot_actions, newly_invalid_slots, restored_slots)
 
         for act in slot_actions:
             logger.action(act["action_type"], act["message"])
@@ -190,7 +190,7 @@ def run(
             slot_actions, blogger_session, player_posts_map, public_posts_map, blog_id, blog_player_id
         )
 
-        all_changed_slots = changed_slots + [s for s in (invalid_slots + restored_slots) if s not in changed_slots]
+        all_changed_slots = changed_slots + [s for s in (newly_invalid_slots + restored_slots) if s not in changed_slots]
         _log_reconciliation_summary(slot_actions, restored_slots, all_changed_slots, player_updates_count)
 
         return all_changed_slots, slot_actions, public_posts_map

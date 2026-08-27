@@ -21,7 +21,7 @@ def get_default_timezone() -> ZoneInfo:
 def resolve_timezone(tz_val) -> timezone | ZoneInfo:
     """
     Converts an IANA timezone name (e.g. 'Asia/Riyadh', 'Africa/Cairo'),
-    a numeric offset (e.g. 3, -4), offset string (e.g. '+01:00', '-05:00', '+3'),
+    a numeric offset (e.g. 3, -4), offset string (e.g. '+01:00', '-05:00', '+3', 'GMT+3', 'UTC+3'),
     or None into a valid timezone object.
     """
     if tz_val is None or tz_val == "":
@@ -32,13 +32,30 @@ def resolve_timezone(tz_val) -> timezone | ZoneInfo:
         return timezone(timedelta(hours=int(tz_val)))
     if isinstance(tz_val, str):
         tz_val = tz_val.strip()
-        # Offset string like "+01:00", "-05:30", "+0300", "+3", "-5"
-        offset_m = re.match(r'^([+-])?(\d{1,2})(?::?(\d{2}))?$', tz_val)
+        if tz_val.upper() in ("GMT", "UTC", "ETC/GMT", "ETC/UTC", "Z"):
+            return timezone.utc
+
+        # Handle GMT+3, UTC+3, GMT-5:30, UTC+03:00, etc.
+        gmt_m = re.match(r'^(?:GMT|UTC)\s*([+-])\s*(\d{1,2})(?::?(\d{2}))?$', tz_val, re.IGNORECASE)
+        if gmt_m:
+            sign = -1 if gmt_m.group(1) == '-' else 1
+            hours = int(gmt_m.group(2))
+            minutes = int(gmt_m.group(3) or 0)
+            return timezone(sign * timedelta(hours=hours, minutes=minutes))
+
+        # Handle offset string like "+01:00", "-05:30", "+0300", "+3", "-5"
+        offset_m = re.match(r'^([+-])(\d{1,2})(?::?(\d{2}))?$', tz_val)
         if offset_m:
             sign = -1 if offset_m.group(1) == '-' else 1
             hours = int(offset_m.group(2))
             minutes = int(offset_m.group(3) or 0)
             return timezone(sign * timedelta(hours=hours, minutes=minutes))
+
+        # Handle unsigned number string like "3", "-3"
+        num_m = re.match(r'^-?\d+$', tz_val)
+        if num_m:
+            return timezone(timedelta(hours=int(tz_val)))
+
         try:
             return ZoneInfo(tz_val)
         except Exception:
@@ -122,14 +139,32 @@ def parse_iso_time(time_str: str) -> datetime:
         except Exception:
             return datetime.min
 
+def normalize_time_str(time_str: str) -> str:
+    """
+    Normalizes time strings containing Arabic digits, diacritics, and Arabic/English AM/PM indicators.
+    """
+    if not time_str:
+        return ""
+    text = str(time_str).strip()
+    # Normalize Eastern Arabic / Persian numerals to Western digits (0-9)
+    arabic_digits = str.maketrans('٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹', '01234567890123456789')
+    text = text.translate(arabic_digits)
+    # Strip Arabic diacritics (tashkeel/harakat)
+    text = re.sub(r'[\u064B-\u065F\u0670]', '', text)
+    # Replace Arabic & English PM indicators with standard spaced ' PM '
+    text = re.sub(r'(?i)(?:\bمساء\b|\bم\b|pm|(?<=\d)\s*م(?!\w))', ' PM ', text)
+    # Replace Arabic & English AM indicators with standard spaced ' AM '
+    text = re.sub(r'(?i)(?:\bصباح\b|\bص\b|am|(?<=\d)\s*ص(?!\w))', ' AM ', text)
+    return re.sub(r'\s+', ' ', text).strip()
+
 def parse_match_time(date_str: str, time_str: str, source_tz: str | int = None, tz_offset: int = None) -> str:
     """
     Parses date and time strings from a source website and converts it to DEFAULT_TIMEZONE ISO 8601 string.
 
     Args:
         date_str:   Date in YYYY-MM-DD format.
-        time_str:   Time string as shown on the source website (e.g. "09:00 PM", "14:00", "14:00:00").
-        source_tz:  The source website's timezone identifier (e.g. "Asia/Riyadh", "+01:00"). Defaults to DEFAULT_TIMEZONE.
+        time_str:   Time string as shown on the source website (e.g. "09:00 PM", "14:00", "14:00:00", "7:00 م").
+        source_tz:  The source website's timezone identifier (e.g. "Asia/Riyadh", "+01:00", "Etc/GMT-3").
         tz_offset:  Optional backwards-compatible numeric offset parameter.
 
     Returns:
@@ -139,17 +174,19 @@ def parse_match_time(date_str: str, time_str: str, source_tz: str | int = None, 
     src_zone = resolve_timezone(actual_source_tz)
     target_zone = get_default_timezone()
 
-    time_str = re.sub(r'\s+', ' ', (time_str or "").strip())
-    # Normalize Arabic AM/PM indicators to standard English
-    time_clean = re.sub(r'(?:مساءً|مساء|م|PM|pm)', 'PM', time_str)
-    time_clean = re.sub(r'(?:صباحاً|صباح|ص|AM|am)', 'AM', time_clean).strip()
+    normalized = normalize_time_str(time_str)
+
+    # Extract time component if surrounded by extraneous text (e.g. "7:00 PM0-0جارية الآن")
+    m = re.search(r'(\b\d{1,2}:\d{2}(?::\d{2})?(?:\s*(?:AM|PM))?)', normalized, re.IGNORECASE)
+    time_clean = m.group(1).strip() if m else normalized
 
     dt_naive = None
     formats = (
-        "%Y-%m-%d %I:%M %p",   # 2026-08-23 02:00 PM
-        "%Y-%m-%d %H:%M",      # 2026-08-23 14:00
-        "%Y-%m-%d %H:%M:%S",   # 2026-08-23 14:00:00
-        "%Y-%m-%d %I:%M",      # 2026-08-23 02:00
+        "%Y-%m-%d %I:%M %p",      # 2026-08-23 02:00 PM
+        "%Y-%m-%d %I:%M:%S %p",   # 2026-08-23 02:00:00 PM
+        "%Y-%m-%d %H:%M",         # 2026-08-23 14:00
+        "%Y-%m-%d %H:%M:%S",      # 2026-08-23 14:00:00
+        "%Y-%m-%d %I:%M",         # 2026-08-23 02:00
     )
 
     for fmt in formats:
@@ -188,10 +225,7 @@ def parse_user_styled_time(time_str: str) -> datetime:
 
     # Strip any parenthetical timezone comments like (UTC+1), (GMT+3), (DEFAULT_TIMEZONE, +01:00)
     clean = re.sub(r'\(.*?\)', '', str(time_str)).strip()
-
-    # Normalize Arabic AM/PM indicators to standard English if present
-    clean = re.sub(r'(?:مساءً|مساء|م|PM|pm)', 'PM', clean)
-    clean = re.sub(r'(?:صباحاً|صباح|ص|AM|am)', 'AM', clean).strip()
+    clean = normalize_time_str(clean)
 
     current_year = datetime.now().year
 

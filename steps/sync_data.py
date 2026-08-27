@@ -7,8 +7,11 @@ import logger
 from utils import (
     get_status_priority,
     parse_user_styled_time,
+    parse_iso_time,
     resolve_timezone,
     broadcast_telegram,
+    get_now_local,
+    is_match_expired,
     PipelineAbortError
 )
 
@@ -16,6 +19,7 @@ from utils import (
 def assemble_matches_feed(matches_cache: dict) -> list[dict]:
     """Builds and sorts the standardized matches array for the data website from matches_cache."""
     feed_list = []
+    now_dt = get_now_local()
     for ev_id, match in matches_cache.items():
         t1_ar = match.get("team1_ar", "").strip()
         t1_en = match.get("team1_en", "").strip()
@@ -33,6 +37,12 @@ def assemble_matches_feed(matches_cache: dict) -> list[dict]:
             continue
 
         raw_time = str(match.get("kickoff_time", "")).strip()
+        duration = int(match.get("duration", 180))
+
+        # Do not include expired matches (> 3 hours post-match TTL) on the data website
+        if is_match_expired(raw_time, duration, now_dt, grace_minutes=180):
+            continue
+
         time_iso = raw_time
         if raw_time and "T" not in raw_time:
             try:
@@ -42,7 +52,6 @@ def assemble_matches_feed(matches_cache: dict) -> list[dict]:
             except Exception:
                 time_iso = raw_time
 
-        duration = int(match.get("duration", 180))
         status_class = match.get("status_class", "not-started")
         is_ended = bool(match.get("is_ended", match.get("ended", status_class == "finished")))
         link = "" if is_ended else (match.get("links", "") or match.get("link", ""))
@@ -93,7 +102,12 @@ def display_data_matches(active_matches_list: list):
         elif m.get("link"):
             status_tag = f"{logger.COLOR_GREEN}[LIVE]{logger.COLOR_RESET}"
         else:
-            status_tag = f"{logger.COLOR_YELLOW}[UPCOMING]{logger.COLOR_RESET}"
+            m_time = parse_iso_time(m.get("time", ""))
+            now_dt = get_now_local()
+            if m_time != datetime.min and now_dt >= m_time:
+                status_tag = f"{logger.COLOR_YELLOW}[LIVE - NO LINK]{logger.COLOR_RESET}"
+            else:
+                status_tag = f"{logger.COLOR_YELLOW}[UPCOMING]{logger.COLOR_RESET}"
 
         link_str = m.get('link', '')
         if len(link_str) > 42:
@@ -155,25 +169,29 @@ def _update_matches_cache_links(scraped_events: list, matches_cache: dict, updat
         if s.get("status", "").strip().lower() in ["valid", "active"] and s.get("event_id") and s.get("event_name", "").strip().lower() not in ["", "free"]
     }
 
-    for ev in scraped_events:
-        ev_id = ev["event_id"]
-        if ev_id in matches_cache:
-            permalink_url = ""
-            if ev_id in slot_by_event_id:
-                s = slot_by_event_id[ev_id]
-                blog_post_id = s.get("blog_post_id", "")
-                if blog_post_id and blog_post_id in public_posts_map:
-                    permalink_url = public_posts_map[blog_post_id].get("url", "")
-                elif blog_post_id:
-                    try:
-                        p_data = blogger_module.fetch_post(blogger_session, blog_id, blog_post_id)
-                        public_posts_map[blog_post_id] = p_data
-                        permalink_url = p_data.get("url", "")
-                    except Exception:
-                        pass
+    scraped_by_event_id = {ev["event_id"]: ev for ev in scraped_events if ev.get("event_id")}
 
-            matches_cache[ev_id]["links"] = permalink_url
-            matches_cache[ev_id]["is_ended"] = ev.get("status_class") == "finished"
+    for ev_id, cached_match in matches_cache.items():
+        if ev_id in scraped_by_event_id:
+            ev = scraped_by_event_id[ev_id]
+            cached_match["status_class"] = ev.get("status_class", cached_match.get("status_class", "not-started"))
+            cached_match["is_ended"] = (ev.get("status_class") == "finished")
+
+        permalink_url = ""
+        if ev_id in slot_by_event_id and not cached_match.get("is_ended", False):
+            s = slot_by_event_id[ev_id]
+            blog_post_id = s.get("blog_post_id", "")
+            if blog_post_id and blog_post_id in public_posts_map:
+                permalink_url = public_posts_map[blog_post_id].get("url", "")
+            elif blog_post_id:
+                try:
+                    p_data = blogger_module.fetch_post(blogger_session, blog_id, blog_post_id)
+                    public_posts_map[blog_post_id] = p_data
+                    permalink_url = p_data.get("url", "")
+                except Exception:
+                    pass
+
+        cached_match["links"] = permalink_url
 
 
 def run(
@@ -207,11 +225,11 @@ def run(
         updated_slots = sheets_module.fetch_all_slots(sheets_client, spreadsheet_name)
         _update_matches_cache_links(scraped_events, matches_cache, updated_slots, public_posts_map, blogger_session, blog_id)
 
+        sheets_module.save_matches_cache(sheets_client, matches_cache, spreadsheet_name)
+
         active_matches_list = assemble_matches_feed(matches_cache)
         logger.info(f"Active matches formatted for the data website ({len(active_matches_list)} matches):")
         display_data_matches(active_matches_list)
-
-        sheets_module.save_matches_cache(sheets_client, matches_cache, spreadsheet_name)
 
         sync_data_page(blogger_session, blog_data_id, data_page_id, matches_cache, skip_display=True, active_matches_list=active_matches_list)
         send_reconciliation_report(slot_actions, telegram_token, send_report_chat_ids)

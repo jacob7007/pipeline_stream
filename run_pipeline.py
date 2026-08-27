@@ -99,7 +99,7 @@ def main():
 
         # Step 3: Validating slots
         logger.step_header("3/6", "Validating slots")
-        valid_slots, invalid_slots, restored_slots = verify_slots.run(
+        valid_slots, newly_invalid_slots, restored_slots = verify_slots.run(
             blogger_session, slots, BLOG_ID, BLOG_PLAYER_ID,
             telegram_token, allowed_chat_ids
         )
@@ -107,13 +107,27 @@ def main():
         # Step 4: Scraping competitors live matches
         logger.step_header("4/6", "Scraping competitors live matches")
         scraped_events, team_translations, matches_cache = scrape_matches.run(
-            sheets_client, args.sheet
+            sheets_client, args.sheet, slots=valid_slots
         )
+
+        if not scraped_events:
+            print()
+            logger.info("Scraper found 0 matches. Skipping slot reconciliation to protect active stream slots.")
+            logger.step_header("SYNC", "Syncing Data Website directly from cache")
+            if newly_invalid_slots or restored_slots:
+                sheets_module.update_changed_slots(sheets_client, newly_invalid_slots + restored_slots, args.sheet)
+            sheets_module.save_matches_cache(sheets_client, matches_cache, args.sheet)
+            active_matches_list = sync_data.assemble_matches_feed(matches_cache)
+            logger.info(f"Active matches formatted for the data website ({len(active_matches_list)} matches):")
+            sync_data.display_data_matches(active_matches_list)
+            sync_data.sync_data_page(blogger_session, BLOG_DATA_ID, DATA_PAGE_ID, matches_cache, skip_display=True, active_matches_list=active_matches_list)
+            logger.pipeline_end("Stream pipeline completed safely (0 matches scheduled, cache synced)", is_error=False)
+            return
 
         # Step 5: Reconciling & updating slots
         logger.step_header("5/6", "Reconciling & updating slots")
         all_changed_slots, slot_actions, public_posts_map = reconcile_slots.run(
-            blogger_session, valid_slots, invalid_slots, restored_slots,
+            blogger_session, valid_slots, newly_invalid_slots, restored_slots,
             scraped_events, BLOG_ID, BLOG_PLAYER_ID
         )
 

@@ -319,6 +319,14 @@ def save_matches_cache(client, matches_cache: dict, spreadsheet_name: str = "Str
     now_local = get_now_local()
     now_local_str = format_to_human_time(now_local.replace(tzinfo=resolve_timezone(None)).isoformat())
 
+    # Purge expired matches in-place from the matches_cache dictionary
+    expired_ids = [
+        ev_id for ev_id, data in matches_cache.items()
+        if is_match_expired(data.get("kickoff_time", ""), int(data.get("duration", 180)), now, grace_minutes=180)
+    ]
+    for ev_id in expired_ids:
+        del matches_cache[ev_id]
+
     valid_cache_rows = _filter_valid_cache_rows(matches_cache, now, now_local_str)
 
     # Smart change detection: compare existing data cells with new rows (ignoring timestamp column)

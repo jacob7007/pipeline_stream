@@ -57,7 +57,8 @@ def _persist_scraper_translations(sheets_client, spreadsheet_name: str, new_tran
 
 def run(
     sheets_client,
-    spreadsheet_name: str
+    spreadsheet_name: str,
+    slots: list = None
 ) -> tuple[list, dict, dict]:
     """
     Step 4: Scrapes live matches from competitors, renders display preview, and persists translations.
@@ -68,7 +69,7 @@ def run(
 
     try:
         scraped_events, new_translations, updated_matches_cache, alias_updates = scraper_module.scrape_live_matches(
-            team_translations=team_translations, matches_cache=matches_cache
+            team_translations=team_translations, matches_cache=matches_cache, slots=slots
         )
     except ConnectionError as ce:
         logger.error(f"Scraper: Connection failure fetching match sources: {ce}")
@@ -84,11 +85,8 @@ def run(
         )
 
     if not scraped_events:
-        logger.error("Scraper: 0 matches found across all sources.")
-        raise PipelineAbortError(
-            "SCRAPER : 0 MATCHES FOUND",
-            "Scraper returned 0 matches across all sources. Halting pipeline to protect active stream slots."
-        )
+        logger.item("Scraper: 0 matches currently scheduled on competitor websites.")
+        return [], team_translations, updated_matches_cache or matches_cache
 
     scraped_events.sort(key=lambda ev: (-get_status_priority(ev.get("status_class", "not-started")), ev["time"]))
     logger.item(f"Scraped {len(scraped_events)} total matches:")

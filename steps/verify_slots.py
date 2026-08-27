@@ -79,7 +79,7 @@ def _validate_single_slot(
 ) -> tuple[str, dict]:
     """
     Validates a single slot's post IDs against Blogger.
-    Returns ('valid' | 'invalid' | 'restored', slot).
+    Returns ('valid' | 'invalid' | 'restored' | 'already_invalid', slot).
     """
     slot_name = get_slot_label(slot)
     blog_post_id = slot.get("blog_post_id", "").strip()
@@ -87,6 +87,11 @@ def _validate_single_slot(
     current_status = slot.get("status", "").strip().lower()
 
     if not blog_post_id or not channel_post_id:
+        if current_status in ["invalid", "broken", "deleted"]:
+            # Slot is already invalid in Google Sheets — preserve state without alerting or marking changed
+            slot.update({"status": "invalid", "event_id": "", "event_name": "", "kickoff_time": ""})
+            return "already_invalid", slot
+
         missing_item = "channel_post_id" if not channel_post_id else "blog_post_id"
         if not blog_post_id and not channel_post_id:
             missing_item = "both blog_post_id and channel_post_id"
@@ -108,6 +113,11 @@ def _validate_single_slot(
             slot["status"] = "valid"
             return "valid", slot
 
+    if current_status in ["invalid", "broken", "deleted"]:
+        # Slot is already invalid in Google Sheets — preserve state without alerting or marking changed
+        slot.update({"status": "invalid", "event_id": "", "event_name": "", "kickoff_time": ""})
+        return "already_invalid", slot
+
     failed_parts = []
     if not is_blog_live:
         failed_parts.append("Public Blog post is in draft/deleted")
@@ -127,8 +137,8 @@ def run(
     allowed_chat_ids: list = None
 ) -> tuple[list, list, list]:
     """
-    Step 3: Validates post IDs for each slot and filters valid, invalid, and restored slots.
-    Returns (valid_slots, invalid_slots, restored_slots).
+    Step 3: Validates post IDs for each slot and filters valid, newly invalid, and restored slots.
+    Returns (valid_slots, newly_invalid_slots, restored_slots).
     """
     if allowed_chat_ids is None:
         allowed_chat_ids = []
@@ -138,8 +148,9 @@ def run(
         player_post_ids = _fetch_blogger_posts_status(blogger_session, blog_player_id, "the player website")
 
         valid_slots = []
-        invalid_slots = []
+        newly_invalid_slots = []
         restored_slots = []
+        already_invalid_count = 0
 
         for slot in slots:
             outcome, updated_slot = _validate_single_slot(
@@ -151,11 +162,16 @@ def run(
             elif outcome == "restored":
                 valid_slots.append(updated_slot)
                 restored_slots.append(updated_slot)
-            else:
-                invalid_slots.append(updated_slot)
+            elif outcome == "invalid":
+                newly_invalid_slots.append(updated_slot)
+            elif outcome == "already_invalid":
+                already_invalid_count += 1
 
         logger.item(f"{len(valid_slots)} slots valid.")
-        logger.item(f"{len(invalid_slots)} invalid.")
-        return valid_slots, invalid_slots, restored_slots
+        total_invalid = len(newly_invalid_slots) + already_invalid_count
+        if total_invalid > 0:
+            new_info = f" ({len(newly_invalid_slots)} newly marked)" if newly_invalid_slots else ""
+            logger.item(f"{total_invalid} invalid{new_info}.")
+        return valid_slots, newly_invalid_slots, restored_slots
     except Exception as e:
         raise PipelineAbortError("SLOT VALIDATION FAILED", f"Error validating slots: {e}")
