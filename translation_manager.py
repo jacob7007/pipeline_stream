@@ -5,6 +5,12 @@ import requests
 import gspread
 import logger
 from sheets_module import open_spreadsheet
+from normalization import (
+    are_arabic_names_equivalent,
+    are_english_teams_equivalent,
+    normalize_arabic_text,
+    normalize_english_team
+)
 
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
@@ -70,21 +76,51 @@ def load_team_translations(client, spreadsheet_name: str = "Streaming Dashboard"
 
 
 def find_existing_translation(name: str, team_translations: dict) -> dict:
-    """Looks up a team name in the team_translations cache using exact matching."""
-    if not team_translations:
+    """
+    Looks up a team name in the team_translations cache using exact matching,
+    alias matching, and Arabic phonetic/orthographic normalization.
+    Prioritizes fully translated entries over placeholder ('--' / '###') rows.
+    """
+    if not team_translations or not name:
         return None
 
+    # Step 1: Direct exact primary name match (if fully translated)
     if name in team_translations:
-        return team_translations[name]
+        entry = team_translations[name]
+        if entry.get("nameEn") != "Unknown" and entry.get("code") != "###":
+            return entry
 
+    # Step 2: Exact alias lookup across all loaded translations (if fully translated)
     for v in team_translations.values():
+        if v.get("nameEn") == "Unknown" or v.get("code") == "###":
+            continue
         orig_cell = v.get("original_arabic_cell", "")
         if not orig_cell:
             continue
         aliases = [a.strip() for a in re.split(r'[|;\n,]', orig_cell) if a.strip()]
         if name in aliases:
             return v
-    return None
+
+    # Step 3: Arabic phonetic/orthographic normalization match
+    best_candidate = None
+    for v in team_translations.values():
+        orig_cell = v.get("original_arabic_cell", "")
+        aliases = [a.strip() for a in re.split(r'[|;\n,]', orig_cell) if a.strip()] if orig_cell else []
+        if not aliases and v.get("primary_arabic"):
+            aliases = [v["primary_arabic"]]
+
+        for alias in aliases:
+            if are_arabic_names_equivalent(name, alias):
+                if v.get("nameEn") != "Unknown" and v.get("code") != "###":
+                    return v
+                if best_candidate is None:
+                    best_candidate = v
+
+    # Step 4: Fallback to direct placeholder if no valid translation was found
+    if name in team_translations:
+        return team_translations[name]
+
+    return best_candidate
 
 
 def update_team_aliases(client, alias_updates: list, spreadsheet_name: str = "Streaming Dashboard"):
@@ -225,11 +261,7 @@ def _resolve_team_logo_and_type(name: str, code: str, matches_to_process: list) 
 
 
 def _is_unknown_team(name_en: str, code: str) -> bool:
-    """Returns True if the AI response indicates it does not know this team.
-
-    Catches: explicit Unknown/### sentinels, empty values, old CLUB fallback,
-    and cases where the AI echoed the Arabic name back as the English name.
-    """
+    """Returns True if the AI response indicates it does not know this team."""
     if not name_en or name_en.strip().lower() == "unknown":
         return True
     if not code or code.strip().upper() in ("###", "CLUB", ""):
@@ -241,12 +273,7 @@ def _is_unknown_team(name_en: str, code: str) -> bool:
 
 
 def _add_placeholder_row(name: str, logo_url: str, team_translations: dict, new_translations_list: list):
-    """Writes a '--' placeholder row to Sheets and sets the team as Unknown in memory.
-
-    Used when the AI does not know the team or returns a potentially wrong match.
-    The human can open Google Sheets, see the Arabic name + logo, and fill in the correct
-    English name and code. Next run, the entry is loaded normally.
-    """
+    """Writes a '--' placeholder row to Sheets and sets the team as Unknown in memory."""
     team_translations[name] = {
         "nameEn": "Unknown",
         "code": "###",
@@ -256,6 +283,42 @@ def _add_placeholder_row(name: str, logo_url: str, team_translations: dict, new_
         "original_arabic_cell": name
     }
     new_translations_list.append((name, "--", "###", logo_url, "club"))
+
+
+def _find_matching_cached_team(name_en: str, code: str, team_translations: dict) -> dict | None:
+    """
+    Searches for an existing team in cache that matches the newly translated team
+    by exact name, canonical English equivalence, or official team code.
+    """
+    if not team_translations:
+        return None
+
+    clean_en = name_en.strip().lower()
+    clean_code = code.strip().upper()
+
+    # Pass 1: Exact English name or code match on fully translated teams
+    for v in team_translations.values():
+        v_en = v.get("nameEn", "").strip().lower()
+        v_code = v.get("code", "").strip().upper()
+        if v_en == "unknown" or v_code == "###":
+            continue
+
+        if v_en == clean_en:
+            return v
+        if clean_code and clean_code != "###" and v_code == clean_code:
+            return v
+
+    # Pass 2: Canonical English team equivalence (e.g. Ferencvárosi TC vs Ferencváros)
+    for v in team_translations.values():
+        v_en = v.get("nameEn", "").strip()
+        v_code = v.get("code", "").strip().upper()
+        if v.get("nameEn") == "Unknown" or v_code == "###":
+            continue
+
+        if are_english_teams_equivalent(name_en, v_en):
+            return v
+
+    return None
 
 
 def resolve_missing_teams(missing_team_names: list, team_translations: dict, matches_to_process: list) -> tuple:
@@ -283,8 +346,6 @@ def resolve_missing_teams(missing_team_names: list, team_translations: dict, mat
             name_en = "Unknown"
             code = "###"
 
-        # Always resolve the scraped logo first — it is contextually correct for this match
-        # Use "###" as code for type-resolution when unknown so we always get "club" + scraped logo
         type_code = "###" if _is_unknown_team(name_en, code) else code
         team_type, logo_url = _resolve_team_logo_and_type(name, type_code, matches_to_process)
 
@@ -294,23 +355,32 @@ def resolve_missing_teams(missing_team_names: list, team_translations: dict, mat
             _add_placeholder_row(name, logo_url, team_translations, new_translations_list)
             continue
 
-        # Check if AI's translated nameEn already exists in the cache
-        normalized_name_en = name_en.lower()
-        found_team_entry = next(
-            (v for v in team_translations.values() if v.get("nameEn", "").strip().lower() == normalized_name_en),
-            None
-        )
+        # Check if this team is an alias or variant of an already known team
+        matched_cached_team = _find_matching_cached_team(name_en, code, team_translations)
 
-        if found_team_entry:
-            # AI matched an existing entry — this could be a wrong match (e.g. نيوم → Newcastle United).
-            # Write "--" row for human review instead of auto-aliasing and risking wrong data.
-            logger.warning(
-                f"Translation: AI matched '{name}' to existing '{found_team_entry['nameEn']}' — "
-                f"may be wrong. Adding '--' row for human review."
+        if matched_cached_team:
+            # Auto-link as alias to existing team entry
+            canonical_en = matched_cached_team.get("nameEn", name_en)
+            canonical_code = matched_cached_team.get("code", code)
+            canonical_logo = matched_cached_team.get("logo_url") or logo_url
+
+            orig_cell = matched_cached_team.get("original_arabic_cell", "")
+            aliases = [a.strip() for a in re.split(r'[|;\n,]', orig_cell) if a.strip()] if orig_cell else []
+            if name not in aliases:
+                new_val = f"{orig_cell} | {name}" if orig_cell else name
+                matched_cached_team["original_arabic_cell"] = new_val
+                row_num = matched_cached_team.get("row_num")
+                sheet_name = matched_cached_team.get("sheet_name")
+                if row_num and sheet_name:
+                    alias_updates.append((row_num, sheet_name, new_val))
+
+            team_translations[name] = matched_cached_team
+            logger.success(
+                f"Translation: Auto-linked Arabic name '{name}' as alias for existing team '{canonical_en}' ({canonical_code})."
             )
-            _add_placeholder_row(name, logo_url, team_translations, new_translations_list)
             continue
 
+        # Brand new team — add to cache and record new row for Google Sheets
         team_translations[name] = {
             "nameEn": name_en,
             "code": code,
@@ -322,3 +392,4 @@ def resolve_missing_teams(missing_team_names: list, team_translations: dict, mat
         new_translations_list.append((name, name_en, code, logo_url, team_type))
 
     return new_translations_list, alias_updates
+

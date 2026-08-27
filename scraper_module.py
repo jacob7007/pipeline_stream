@@ -26,6 +26,12 @@ from utils import (
 from translation_manager import find_existing_translation, resolve_missing_teams
 from iframe_resolver import resolve_match_channels
 from scrapers import SCRAPER_PLUGINS
+from normalization import (
+    are_arabic_names_equivalent,
+    are_english_teams_equivalent,
+    get_arabic_match_fingerprint,
+    normalize_arabic_text
+)
 
 # Parse SCRAPER_URLS from environment variable into (url, source_tz) tuples
 SCRAPER_URLS_ENV = os.environ.get("SCRAPER_URLS", "").strip()
@@ -164,6 +170,37 @@ def migrate_matches_cache_translations(matches_cache: dict, team_translations: d
         else:
             matches_cache[old_event_id] = cached_match
 
+    # Pass 2: Merge any remaining duplicate matches in cache that represent the same match
+    cleaned_cache = {}
+    for ev_id, match in matches_cache.items():
+        k_time = match.get("kickoff_time", "")
+        t1_en = match.get("team1_en", "") or match.get("team1_ar", "")
+        t2_en = match.get("team2_en", "") or match.get("team2_ar", "")
+
+        duplicate_target_id = None
+        for exist_id, exist_match in cleaned_cache.items():
+            if exist_match.get("kickoff_time") == k_time:
+                ex_t1 = exist_match.get("team1_en", "") or exist_match.get("team1_ar", "")
+                ex_t2 = exist_match.get("team2_en", "") or exist_match.get("team2_ar", "")
+                if (are_english_teams_equivalent(t1_en, ex_t1) and are_english_teams_equivalent(t2_en, ex_t2)) or \
+                   (are_arabic_names_equivalent(t1_en, ex_t1) and are_arabic_names_equivalent(t2_en, ex_t2)):
+                    duplicate_target_id = exist_id
+                    break
+
+        if duplicate_target_id:
+            target = cleaned_cache[duplicate_target_id]
+            if not target.get("links") and match.get("links"):
+                target["links"] = match["links"]
+            if target.get("status_class") != "live" and match.get("status_class") == "live":
+                target["status_class"] = "live"
+            logger.info(f"Cache: Consolidated duplicate match '{ev_id}' into '{duplicate_target_id}'")
+            migrated_count += 1
+        else:
+            cleaned_cache[ev_id] = match
+
+    matches_cache.clear()
+    matches_cache.update(cleaned_cache)
+
     if migrated_count > 0:
         logger.success(f"Translation: Migrated/cleaned {migrated_count} match cache entries with updated translations.")
 
@@ -204,10 +241,24 @@ def _fetch_single_url_matches(url: str, source_tz, clean_url: str, max_url_len: 
     return raw_matches, ""
 
 
+def _is_duplicate_raw_match(match_data: dict, existing_matches: list) -> bool:
+    """Checks if a match was already scraped from another source using date and Arabic team equivalence."""
+    d_new = match_data.get("date_str", "").strip()
+    t1_new = match_data["team1_name"].strip()
+    t2_new = match_data["team2_name"].strip()
+    for ex in existing_matches:
+        if ex.get("date_str", "").strip() == d_new:
+            ex_t1 = ex["team1_name"].strip()
+            ex_t2 = ex["team2_name"].strip()
+            if (are_arabic_names_equivalent(t1_new, ex_t1) and are_arabic_names_equivalent(t2_new, ex_t2)) or \
+               (are_arabic_names_equivalent(t1_new, ex_t2) and are_arabic_names_equivalent(t2_new, ex_t1)):
+                return True
+    return False
+
+
 def _fetch_and_parse_urls(urls_to_scrape: list) -> tuple[list, set]:
     matches_to_process = []
     unique_team_names = set()
-    seen_matches = set()
     errors = []
 
     max_url_len = max((len(url.split("://")[-1].rstrip("/")) for url, _ in urls_to_scrape), default=0)
@@ -221,14 +272,11 @@ def _fetch_and_parse_urls(urls_to_scrape: list) -> tuple[list, set]:
         for match_data in raw_matches:
             t1 = match_data["team1_name"].strip()
             t2 = match_data["team2_name"].strip()
-            d_str = match_data.get("date_str", "").strip()
 
             # Deduplicate across multiple sources by normalized team names and date
-            match_key = (t1.lower(), t2.lower(), d_str)
-            if match_key in seen_matches:
+            if _is_duplicate_raw_match(match_data, matches_to_process):
                 continue
 
-            seen_matches.add(match_key)
             unique_team_names.add(t1)
             unique_team_names.add(t2)
             matches_to_process.append(match_data)
@@ -334,7 +382,7 @@ def _build_match_event(match_data: dict, team_translations: dict, matches_cache:
 
 
 def _process_matches(matches_to_process: list, team_translations: dict, matches_cache: dict, now_dt: datetime, proxies: dict) -> tuple:
-    parsed_matches = []
+    parsed_matches_map = {}
     updated_matches_cache = {}
     if matches_to_process:
         logger.info(f"Scraper: Resolving stream channels for {len(matches_to_process)} matches...")
@@ -342,7 +390,16 @@ def _process_matches(matches_to_process: list, team_translations: dict, matches_
     for match_data in matches_to_process:
         event, cache_entry = _build_match_event(match_data, team_translations, matches_cache, now_dt, proxies)
         if event is not None:
-            parsed_matches.append(event)
+            ev_id = event["event_id"]
+            if ev_id in parsed_matches_map:
+                existing_ev = parsed_matches_map[ev_id]
+                if not existing_ev.get("channels") and event.get("channels"):
+                    existing_ev["channels"] = event["channels"]
+                if event.get("status_class") == "live" and existing_ev.get("status_class") != "live":
+                    existing_ev["status_class"] = "live"
+            else:
+                parsed_matches_map[ev_id] = event
+
             # Prioritize 'live' status entries when merging cache entries for shared events
             for ev_id, entry in cache_entry.items():
                 if ev_id in updated_matches_cache:
@@ -360,6 +417,24 @@ def _process_matches(matches_to_process: list, team_translations: dict, matches_
                 if is_match_expired(k_time, duration, now_dt, grace_minutes=180):
                     continue
 
+                # Check if an equivalent match was already processed under another ID in this run
+                c_t1 = cached_entry.get("team1_en") or cached_entry.get("team1_ar", "")
+                c_t2 = cached_entry.get("team2_en") or cached_entry.get("team2_ar", "")
+                is_duplicate = False
+                for up_id, up_entry in updated_matches_cache.items():
+                    u_k_time = up_entry.get("kickoff_time", "")
+                    if u_k_time and k_time and u_k_time == k_time:
+                        u_t1 = up_entry.get("team1_en") or up_entry.get("team1_ar", "")
+                        u_t2 = up_entry.get("team2_en") or up_entry.get("team2_ar", "")
+                        if (are_english_teams_equivalent(c_t1, u_t1) and are_english_teams_equivalent(c_t2, u_t2)) or \
+                           (are_arabic_names_equivalent(c_t1, u_t1) and are_arabic_names_equivalent(c_t2, u_t2)):
+                            is_duplicate = True
+                            break
+
+                if is_duplicate:
+                    logger.info(f"Cache: Pruned obsolete/duplicate cache entry '{ev_id}' (superseded by active scrape).")
+                    continue
+
                 retained_entry = dict(cached_entry)
                 # If match duration has passed (~135 min realistic duration) or it was marked finished, ensure it stays finished and link is cleared
                 if retained_entry.get("status_class") == "finished" or is_match_ended(k_time, min(duration, 135), now_dt):
@@ -369,7 +444,7 @@ def _process_matches(matches_to_process: list, team_translations: dict, matches_
 
                 updated_matches_cache[ev_id] = retained_entry
 
-    return parsed_matches, updated_matches_cache
+    return list(parsed_matches_map.values()), updated_matches_cache
 
 
 def scrape_live_matches(team_translations: dict = None, matches_cache: dict = None, slots: list = None) -> tuple:

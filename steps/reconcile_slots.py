@@ -108,6 +108,25 @@ def execute_slot_updates(actions: list, blogger_session, player_posts_map: dict,
                 "status": "valid"
             })
             changed_slots.append(slot)
+        elif action_type == "sync_channels":
+            if channel_post_id:
+                old_content = player_posts_map.get(channel_post_id, {}).get("content", "")
+                player_url = _patch_single_player_channel(slot, event, channel_post_id, blogger_session, player_posts_map, blog_player_id)
+                new_content = player_posts_map.get(channel_post_id, {}).get("content", "")
+                if old_content and new_content != old_content:
+                    player_updates_count += 1
+
+            sheet_name = slot.get("event_name", "").strip()
+            sheet_kickoff = slot.get("kickoff_time", "").strip()
+            expected_name = get_event_display_name(event)
+            expected_kickoff = format_to_human_time(event["time"])
+            if sheet_name != expected_name or sheet_kickoff != expected_kickoff:
+                slot.update({
+                    "event_name": expected_name,
+                    "kickoff_time": expected_kickoff,
+                    "status": "valid"
+                })
+                changed_slots.append(slot)
         elif action_type == "assign_new":
             ev_id = event["event_id"]
             player_url = ""
@@ -136,7 +155,7 @@ def _log_reconciliation_summary(slot_actions: list, restored_slots: list, all_ch
     """Prints a human-readable summary of applied reconciliation updates."""
     assigned_count = sum(1 for a in slot_actions if a["action_type"] == "assign_new")
     freed_count = sum(1 for a in slot_actions if a["action_type"] == "free_slot")
-    updated_count = sum(1 for a in slot_actions if a["action_type"] == "update_sheet_only")
+    updated_count = sum(1 for a in slot_actions if a["action_type"] == "update_sheet_only") + len(all_changed_slots)
     restored_count = len(restored_slots)
 
     summary_parts = []

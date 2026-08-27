@@ -43,7 +43,7 @@ def patch_blog_html(content: str, new_iframe_url: str) -> str:
         
     replacement = (
         r'\1\n'
-        f'<iframe allowfullscreen="true" frameborder="0" height="500px" src="{new_iframe_url}" sandbox="allow-scripts allow-same-origin" referrerpolicy="no-referrer" loading="lazy" width="100%"></iframe>\n'
+        f'<iframe allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" allowfullscreen="true" frameborder="0" height="500px" src="{new_iframe_url}" referrerpolicy="no-referrer" loading="lazy" width="100%"></iframe>\n'
         r'\2'
     )
     

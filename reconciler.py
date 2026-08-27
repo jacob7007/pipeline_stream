@@ -18,14 +18,15 @@ def _categorize_sheet_slots(sheet_slots: list, scraped_map: dict) -> tuple:
         ev_name = slot.get("event_name", "").strip().lower()
         status = slot.get("status", "").strip().lower()
 
-        # Slot is actively assigned to an event
-        if status in ["valid", "active"] and ev_id and ev_name not in ["", "free"]:
-            if ev_id in scraped_map:
-                active_matched.append(slot)
+        if status not in ["invalid", "broken", "deleted"]:
+            # Slot is actively assigned to an event
+            if ev_id and ev_name not in ["", "free"]:
+                if ev_id in scraped_map:
+                    active_matched.append(slot)
+                else:
+                    to_be_freed.append(slot)
             else:
-                to_be_freed.append(slot)
-        elif status in ["valid", "free"]:
-            already_free.append(slot)
+                already_free.append(slot)
 
     return active_matched, to_be_freed, already_free
 
@@ -75,30 +76,18 @@ def _free_unmatched_slots(to_be_freed: list, reassigned_slots: set, actions: lis
 
 
 def _evaluate_matched_slots(active_matched: list, scraped_map: dict, actions: list):
-    """Checks if matched active slots require metadata sync or no action."""
+    """Checks if matched active slots require stream channel updates or metadata sync."""
     for slot in active_matched:
         event = scraped_map[slot["event_id"]]
         event_name = get_event_display_name(event)
         slot_label = get_slot_label(slot)
 
-        sheet_name = slot.get("event_name", "").strip()
-        sheet_kickoff = slot.get("kickoff_time", "").strip()
-        expected_kickoff = format_to_human_time(event["time"])
-
-        if sheet_name != event_name or sheet_kickoff != expected_kickoff:
-            actions.append({
-                "action_type": "update_sheet_only",
-                "slot": slot,
-                "event": event,
-                "message": f"Update sheet metadata only for {slot_label} (event: '{event_name}')"
-            })
-        else:
-            actions.append({
-                "action_type": "no_action",
-                "slot": slot,
-                "event": event,
-                "message": f"{slot_label.capitalize()} is up to date for event '{event_name}'"
-            })
+        actions.append({
+            "action_type": "sync_channels",
+            "slot": slot,
+            "event": event,
+            "message": f"Checking/syncing stream channels for {slot_label} ('{event_name}')"
+        })
 
 
 def reconcile_state(sheet_slots: list, scraped_events: list) -> list:

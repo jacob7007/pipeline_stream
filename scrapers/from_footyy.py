@@ -183,7 +183,7 @@ def _cryptojs_aes_decrypt(ciphertext_b64: str, passphrase: str) -> str:
 
 def _resolve_blogma_encrypted_stream(url: str, proxies: dict = None) -> dict | None:
     """
-    Decrypts Blogma helper pages (sewzzy, swxzyy, nazity, etc.) on the backend to bypass
+    Decrypts Blogma helper pages (sewzzy, swxzyy, nazity, kkzawe, etc.) on the backend to bypass
     browser-side anti-embed checks and extract native Shaka DASH manifest & ClearKeys.
     """
     headers = {
@@ -217,30 +217,61 @@ def _resolve_blogma_encrypted_stream(url: str, proxies: dict = None) -> dict | N
         decB = _cryptojs_aes_decrypt(payload, kB)
         decA = _cryptojs_aes_decrypt(decB, kA)
 
-        # Handle multi-channel definitions (e.g. nazity ?id=spt1)
         parsed_url = urlparse(url)
         qs = parse_qs(parsed_url.query)
-        target_id = qs.get("id", [None])[0]
+        target_id = qs.get("id", [None])[0] or qs.get("src", [None])[0]
 
+        # Case 1: Target channel block within multi-channel dictionary (e.g. "ds": { ... } or ds: { ... })
+        if target_id:
+            pattern = rf'[\'\"]?{re.escape(target_id)}[\'\"]?\s*:\s*\{{([^}}]+)\}}'
+            m_target = re.search(pattern, decA)
+            if m_target:
+                block = m_target.group(1)
+                m_url = re.search(r'(?:url|manifest|file|source|manifestUri)\s*:\s*[\'\"]([^\'\"]+)[\'\"]', block)
+                if m_url:
+                    manifest_url = m_url.group(1)
+                    if manifest_url.startswith("//"):
+                        manifest_url = "https:" + manifest_url
+                    if manifest_url.endswith(".m3u8") or ".m3u8?" in manifest_url:
+                        return {"type": "hls", "url": manifest_url}
+
+                    m_k1 = re.search(r'k1\s*:\s*[\'\"]([a-fA-F0-9]+)[\'\"]', block)
+                    m_k2 = re.search(r'k2\s*:\s*[\'\"]([a-fA-F0-9]+)[\'\"]', block)
+                    if m_k1 and m_k2:
+                        return {"type": "shaka", "manifest": manifest_url, "keys": {m_k1.group(1): m_k2.group(1)}}
+
+                    keys = {}
+                    for km in re.finditer(r'[\'\"]([a-fA-F0-9]{16,32})[\'\"]\s*:\s*[\'\"]([a-fA-F0-9]{16,32})[\'\"]', block):
+                        keys[km.group(1)] = km.group(2)
+                    return {"type": "shaka", "manifest": manifest_url, "keys": keys}
+
+        # Case 2: Match general multi-channel definitions with canais/channels object
         canais_match = re.search(r'(?:canais|channels|streams)\s*=\s*(\{[\s\S]*?\n\s*\};)', decA)
         if canais_match and target_id:
             raw_canais = canais_match.group(1)
-            for cm in re.finditer(r'([a-zA-Z0-9_-]+)\s*:\s*\{\s*url\s*:\s*[\'\"]([^\'\"]+)[\'\"]\s*,\s*(?:clearkey|clearKeys|keys)\s*:\s*(\{[\s\S]*?\})\s*\}', raw_canais):
+            for cm in re.finditer(r'[\'\"]?([a-zA-Z0-9_-]+)[\'\"]?\s*:\s*\{\s*(?:url|manifest|file)\s*:\s*[\'\"]([^\'\"]+)[\'\"][\s\S]*?\}', raw_canais):
                 cid = cm.group(1)
                 if cid == target_id:
-                    curl = cm.group(2)
+                    block = cm.group(0)
+                    m_url = re.search(r'(?:url|manifest|file)\s*:\s*[\'\"]([^\'\"]+)[\'\"]', block)
+                    curl = m_url.group(1) if m_url else ""
                     if curl.startswith("//"):
                         curl = "https:" + curl
-                    ck_raw = cm.group(3)
+                    if curl.endswith(".m3u8") or ".m3u8?" in curl:
+                        return {"type": "hls", "url": curl}
+
+                    m_k1 = re.search(r'k1\s*:\s*[\'\"]([a-fA-F0-9]+)[\'\"]', block)
+                    m_k2 = re.search(r'k2\s*:\s*[\'\"]([a-fA-F0-9]+)[\'\"]', block)
+                    if m_k1 and m_k2:
+                        return {"type": "shaka", "manifest": curl, "keys": {m_k1.group(1): m_k2.group(1)}}
+
                     keys = {}
-                    for km in re.finditer(r'[\'\"]([a-fA-F0-9]+)[\'\"]\s*:\s*[\'\"]([a-fA-F0-9]+)[\'\"]', ck_raw):
+                    for km in re.finditer(r'[\'\"]([a-fA-F0-9]{16,32})[\'\"]\s*:\s*[\'\"]([a-fA-F0-9]{16,32})[\'\"]', block):
                         keys[km.group(1)] = km.group(2)
                     return {"type": "shaka", "manifest": curl, "keys": keys}
 
-        # Handle single manifest definitions
-        m_manifest = re.search(r'(?:manifestUri|manifest|file|source|url)\s*[:=]\s*[\'\"]([^\'\"]+)[\'\"]', decA)
-        m_keys = re.search(r'(?:clearKeys|clearkey|keys)\s*[:=]\s*(\{[\s\S]*?\n\s*\})', decA)
-
+        # Case 3: Single manifest definition
+        m_manifest = re.search(r'(?:manifestUri|manifest|file|source|url)\s*[:=]\s*[\'\"]([^\'\"]+\.(?:mpd|m3u8)[^\'\"]*)[\'\"]', decA)
         if m_manifest:
             manifest_url = m_manifest.group(1)
             if manifest_url.startswith("//"):
@@ -249,11 +280,14 @@ def _resolve_blogma_encrypted_stream(url: str, proxies: dict = None) -> dict | N
             if manifest_url.endswith(".m3u8") or ".m3u8?" in manifest_url:
                 return {"type": "hls", "url": manifest_url}
 
+            m_k1 = re.search(r'k1\s*[:=]\s*[\'\"]([a-fA-F0-9]+)[\'\"]', decA)
+            m_k2 = re.search(r'k2\s*[:=]\s*[\'\"]([a-fA-F0-9]+)[\'\"]', decA)
+            if m_k1 and m_k2:
+                return {"type": "shaka", "manifest": manifest_url, "keys": {m_k1.group(1): m_k2.group(1)}}
+
             keys = {}
-            if m_keys:
-                ck_raw = m_keys.group(1)
-                for km in re.finditer(r'[\'\"]([a-fA-F0-9]+)[\'\"]\s*:\s*[\'\"]([a-fA-F0-9]+)[\'\"]', ck_raw):
-                    keys[km.group(1)] = km.group(2)
+            for km in re.finditer(r'[\'\"]([a-fA-F0-9]{16,32})[\'\"]\s*:\s*[\'\"]([a-fA-F0-9]{16,32})[\'\"]', decA):
+                keys[km.group(1)] = km.group(2)
 
             return {"type": "shaka", "manifest": manifest_url, "keys": keys}
 
@@ -385,25 +419,47 @@ def _format_channel_entry(entry: dict, idx: int, proxies: dict = None) -> dict |
                 **drm_stream
             }
 
+    if c_type in ("yt", "youtube") or "youtube.com" in full_url or "youtu.be" in full_url:
+        yt_id = c_url
+        if "watch?v=" in yt_id:
+            yt_id = yt_id.split("watch?v=")[1].split("&")[0]
+        elif "youtu.be/" in yt_id:
+            yt_id = yt_id.split("youtu.be/")[1].split("?")[0]
+        elif "embed/" in yt_id:
+            yt_id = yt_id.split("embed/")[1].split("?")[0]
+        return {
+            "id": c_id,
+            "name": c_name,
+            "quality": "YouTube",
+            "type": "iframe",
+            "url": f"https://www.youtube.com/embed/{yt_id}?autoplay=1",
+            "sandbox": "allow-scripts allow-same-origin allow-presentation"
+        }
     if c_type == "ok":
         return {
             "id": c_id, "name": c_name, "quality": "OK.ru", "type": "iframe",
             "url": f"https://games.ok.ru/videoembed/{c_url}?nochat=1&autoplay=0",
-            "sandbox": "allow-scripts allow-same-origin allow-presentation allow-forms"
+            "sandbox": "allow-scripts allow-same-origin allow-presentation"
         }
     if c_type == "hs" or full_url.endswith(".m3u8") or ".m3u8?" in full_url:
         return {
             "id": c_id, "name": c_name, "quality": "HLS", "type": "hls", "url": full_url
         }
+    if "yasirtv.com" in full_url or "tvsir" in full_url or "sir-tv" in full_url:
+        return {
+            "id": c_id, "name": c_name, "quality": "1080p", "type": "iframe",
+            "url": full_url,
+            "sandbox": "allow-scripts allow-same-origin allow-presentation"
+        }
     if c_type in ("i", "ii") and full_url.startswith(("http://", "https://")):
         return {
-            "id": c_id, "name": c_name, "quality": "1080p" if "475" in full_url else "HD", "type": "iframe",
-            "url": full_url, "sandbox": "allow-scripts allow-same-origin allow-presentation allow-forms"
+            "id": c_id, "name": c_name, "quality": "HD", "type": "iframe",
+            "url": full_url
         }
     if full_url.startswith(("http://", "https://")):
         return {
             "id": c_id, "name": c_name, "quality": "HD", "type": "iframe",
-            "url": full_url, "sandbox": "allow-scripts allow-same-origin allow-presentation allow-forms"
+            "url": full_url
         }
     return None
 
