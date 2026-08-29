@@ -1,5 +1,4 @@
-from utils import format_to_human_time, get_slot_label, get_event_display_name
-import logger
+from utils import get_slot_label, get_event_display_name
 
 
 def _get_slot_identifier(slot: dict) -> str:

@@ -1,4 +1,3 @@
-import json
 from datetime import datetime
 import sheets_module
 import blogger_module

@@ -2,7 +2,6 @@ import os
 import json
 import re
 from datetime import datetime, timedelta
-from urllib.parse import urljoin
 from bs4 import BeautifulSoup
 import requests
 
@@ -29,8 +28,7 @@ from scrapers import SCRAPER_PLUGINS
 from normalization import (
     are_arabic_names_equivalent,
     are_english_teams_equivalent,
-    get_arabic_match_fingerprint,
-    normalize_arabic_text
+    slugify_team_name,
 )
 
 # Parse SCRAPER_URLS from environment variable into (url, source_tz) tuples
@@ -66,17 +64,19 @@ def get_request_proxies() -> dict:
     return None
 
 
-def generate_stable_event_id(t1_code: str, t2_code: str, kickoff_iso: str) -> str:
-    # Sanitize ### (unknown club sentinel) to "unk" so event_id is always URL-safe
-    c1 = re.sub(r'#+', 'unk', (t1_code or "unk").strip().lower())
-    c2 = re.sub(r'#+', 'unk', (t2_code or "unk").strip().lower())
-    match = re.search(r'(\d{2})(\d{2})-(\d{2})-(\d{2})', kickoff_iso)
+def generate_stable_event_id(t1_name_en: str, t2_name_en: str, kickoff_iso: str) -> str:
+    # Use name slugs instead of 3-letter codes — codes are not globally unique for clubs
+    # (e.g. both Levante UD and Bayer Leverkusen share "LEV"), which caused cache collisions.
+    s1 = slugify_team_name(t1_name_en)
+    s2 = slugify_team_name(t2_name_en)
+    match = re.search(r'(\d{2})\d{2}-(\d{2})-(\d{2})', kickoff_iso)
     if match:
-        _, yy, mm, dd = match.groups()
+        yy, mm, dd = match.group(1), match.group(2), match.group(3)
         date_part = f"{yy}-{mm}-{dd}"
     else:
-        date_part = "26-00-00"
-    return f"{c1}-vs-{c2}-{date_part}"
+        date_part = "00-00-00"
+    return f"{s1}-vs-{s2}-{date_part}"
+
 
 
 def migrate_matches_cache_translations(matches_cache: dict, team_translations: dict, slots: list = None) -> dict:
@@ -102,8 +102,6 @@ def migrate_matches_cache_translations(matches_cache: dict, team_translations: d
 
         t1_en = t1_info.get("nameEn", "") if t1_info else cached_match.get("team1_en", "")
         t2_en = t2_info.get("nameEn", "") if t2_info else cached_match.get("team2_en", "")
-        t1_code = t1_info.get("code", "###") if t1_info else "###"
-        t2_code = t2_info.get("code", "###") if t2_info else "###"
         t1_img = t1_info.get("logo_url") if (t1_info and t1_info.get("logo_url")) else cached_match.get("team1_img", "")
         t2_img = t2_info.get("logo_url") if (t2_info and t2_info.get("logo_url")) else cached_match.get("team2_img", "")
 
@@ -123,7 +121,8 @@ def migrate_matches_cache_translations(matches_cache: dict, team_translations: d
                 yy, mm, dd = date_match.groups()
                 kickoff_iso = f"20{yy}-{mm}-{dd}"
 
-        new_event_id = generate_stable_event_id(t1_code, t2_code, kickoff_iso)
+        new_event_id = generate_stable_event_id(t1_en, t2_en, kickoff_iso)
+
 
         name_changed = (t1_en != cached_match.get("team1_en")) or (t2_en != cached_match.get("team2_en"))
         id_changed = (new_event_id != old_event_id)
@@ -291,13 +290,15 @@ def _fetch_and_parse_urls(urls_to_scrape: list) -> tuple[list, set]:
 
 def _build_match_event(match_data: dict, team_translations: dict, matches_cache: dict, now_dt: datetime, proxies: dict) -> tuple:
     t1_name, t2_name = match_data["team1_name"], match_data["team2_name"]
-    t1_info = team_translations.get(t1_name) or {"nameEn": "Unknown", "code": "###"}
-    t2_info = team_translations.get(t2_name) or {"nameEn": "Unknown", "code": "###"}
-    t1_code = t1_info.get("code", "###")
-    t2_code = t2_info.get("code", "###")
+    t1_info = team_translations.get(t1_name) or {"nameEn": "Unknown", "code": ""}
+    t2_info = team_translations.get(t2_name) or {"nameEn": "Unknown", "code": ""}
+
+    team1_en = t1_info.get("nameEn", "")
+    team2_en = t2_info.get("nameEn", "")
 
     formatted_time = parse_match_time(match_data["date_str"], match_data["time_str"], source_tz=match_data.get("source_tz"))
-    event_id = generate_stable_event_id(t1_code, t2_code, formatted_time)
+    event_id = generate_stable_event_id(team1_en, team2_en, formatted_time)
+
 
     match_url = match_data["match_url"]
     cached_match = matches_cache.get(event_id) if event_id else None
@@ -330,9 +331,7 @@ def _build_match_event(match_data: dict, team_translations: dict, matches_cache:
             proxies=proxies
         )
 
-    team1_en = t1_info.get("nameEn", "")
     team1_ar = t1_info.get("primary_arabic") or match_data["team1_name"]
-    team2_en = t2_info.get("nameEn", "")
     team2_ar = t2_info.get("primary_arabic") or match_data["team2_name"]
     team1_img = match_data["team1_orig_img"] or t1_info.get("logo_url", "")
     team2_img = match_data["team2_orig_img"] or t2_info.get("logo_url", "")
@@ -473,6 +472,16 @@ def scrape_live_matches(team_translations: dict = None, matches_cache: dict = No
             missing_team_names.append(name)
 
     new_translations_list, alias_updates = resolve_missing_teams(missing_team_names, team_translations, matches_to_process)
+
+    # Backfill missing logo URLs on existing cached teams using scraped match images
+    for m in matches_to_process:
+        for t_name, img in [(m["team1_name"], m.get("team1_orig_img", "")), (m["team2_name"], m.get("team2_orig_img", ""))]:
+            team = find_existing_translation(t_name, team_translations)
+            if team and not team.get("logo_url") and img:
+                team["logo_url"] = img.strip()
+                if team.get("row_num") and team.get("sheet_name"):
+                    alias_updates.append((team["row_num"], team["sheet_name"], 4, team["logo_url"]))
+
     logger.success("Translation: Translation completed.")
     print()
 

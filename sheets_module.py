@@ -316,8 +316,7 @@ def save_matches_cache(client, matches_cache: dict, spreadsheet_name: str = "Str
         worksheet = sh.add_worksheet(title=sheet_name, rows="1000", cols="13")
 
     now = get_now_local()
-    now_local = get_now_local()
-    now_local_str = format_to_human_time(now_local.replace(tzinfo=resolve_timezone(None)).isoformat())
+    now_local_str = format_to_human_time(now.replace(tzinfo=resolve_timezone(None)).isoformat())
 
     # Purge expired matches in-place from the matches_cache dictionary
     expired_ids = [

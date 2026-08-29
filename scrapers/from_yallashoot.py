@@ -231,3 +231,12 @@ def extract_iframe(match_url: str, proxies: dict = None, context: dict = None) -
         logger.warning(f"Plugin (from_yallashoot): Failed to extract iframe from {match_url}: {e}")
     return ""
 
+
+def extract_channels(match_url: str, proxies: dict = None) -> list[dict]:
+    """Extracts the single stream channel from a Yalla-Shoot match page as a standardised channel list."""
+    iframe_url = extract_iframe(match_url, proxies=proxies)
+    if not iframe_url:
+        return []
+    return [{"id": 1, "name": "Live 1", "quality": "HD", "type": "iframe", "url": iframe_url}]
+
+

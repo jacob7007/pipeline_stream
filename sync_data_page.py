@@ -14,7 +14,7 @@ load_env()
 import sheets_module
 import blogger_module
 import logger
-from steps.sync_data import assemble_matches_feed, display_data_matches, sync_data_page
+from steps.sync_data import assemble_matches_feed, sync_data_page
 
 configure_utf8()
 

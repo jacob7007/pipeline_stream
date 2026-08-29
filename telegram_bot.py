@@ -7,7 +7,6 @@ from utils import (
     send_telegram_message,
     get_allowed_chat_ids,
     get_slot_label,
-    get_blog_label,
     get_telegram_bot_token,
     get_blog_id,
     get_blog_player_id,
@@ -135,9 +134,9 @@ def _format_match_line(idx: int, ev: dict, slots: list, posts_map: dict) -> str:
     assigned_slot_label = ""
     permalink = ""
     for s in slots:
-        status = s.get("status", "").strip().lower()
+        slot_status = s.get("status", "").strip().lower()
         ev_name = s.get("event_name", "").strip().lower()
-        if status in ["valid", "active"] and ev_name not in ["", "free"] and s.get("event_id") == ev["event_id"]:
+        if slot_status in ["valid", "active"] and ev_name not in ["", "free"] and s.get("event_id") == ev["event_id"]:
             assigned_slot_label = get_slot_label(s)
             blog_post_id = s.get("blog_post_id") or s.get("post_id")
             post_info = posts_map.get(blog_post_id)
