@@ -370,6 +370,16 @@ _PRE_SEEDED_DOMAINS = {
 }
 
 
+def domain_to_sheet_format(domain: str) -> str:
+    """Replaces '.' with '_' so Google Sheets does not detect domains as clickable links or flag them."""
+    return domain.strip().lower().replace(".", "_")
+
+
+def domain_from_sheet_format(raw_domain: str) -> str:
+    """Converts domain from sheet format back to standard dot notation."""
+    return raw_domain.strip().lower().replace("_", ".")
+
+
 def load_domain_cache(client: gspread.Client, spreadsheet_name: str = "Streaming Dashboard") -> dict:
     """Loads the domain validation cache from the '_cache_domains' worksheet.
 
@@ -393,7 +403,7 @@ def load_domain_cache(client: gspread.Client, spreadsheet_name: str = "Streaming
     all_values = worksheet.get_all_values()
     if not all_values or len(all_values) <= 1:
         rows = [
-            [d, data["status"], data["failure_reason"], data["last_tested"]]
+            [domain_to_sheet_format(d), data["status"], data["failure_reason"], data["last_tested"]]
             for d, data in sorted(_PRE_SEEDED_DOMAINS.items())
         ]
         try:
@@ -410,9 +420,10 @@ def load_domain_cache(client: gspread.Client, spreadsheet_name: str = "Streaming
     cache = {}
     for row in all_values[1:]:
         padded = row + [""] * (len(headers) - len(row))
-        domain = padded[header_map.get("domain", 0)].strip().lower()
-        if not domain:
+        raw_domain = padded[header_map.get("domain", 0)].strip().lower()
+        if not raw_domain:
             continue
+        domain = domain_from_sheet_format(raw_domain)
         cache[domain] = {
             "status":         padded[header_map.get("status", 1)].strip(),
             "failure_reason": padded[header_map.get("failure_reason", 2)].strip() or "--",
@@ -426,6 +437,8 @@ def load_domain_cache(client: gspread.Client, spreadsheet_name: str = "Streaming
 def save_domain_cache(client: gspread.Client, cache: dict, spreadsheet_name: str = "Streaming Dashboard") -> None:
     """Rewrites the '_cache_domains' worksheet with one row per domain, sorted alphabetically.
 
+    Domains are saved replacing '.' with '_' (e.g. 'youtube_com', 'evemeverbee_info_pl') so that
+    Google Sheets does not detect them as clickable links or flag them as suspicious.
     Eliminates any duplicate rows that may have accumulated from manual editing.
     Only called when the in-memory cache has been modified during the current pipeline run.
     """
@@ -438,8 +451,9 @@ def save_domain_cache(client: gspread.Client, cache: dict, spreadsheet_name: str
     rows = []
     for domain in sorted(cache.keys()):
         entry = cache[domain]
+        sheet_domain = domain_to_sheet_format(domain)
         rows.append([
-            domain,
+            sheet_domain,
             entry.get("status", "--"),
             entry.get("failure_reason", "--"),
             entry.get("last_tested", "--"),
