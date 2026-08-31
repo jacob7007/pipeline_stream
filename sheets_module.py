@@ -30,14 +30,14 @@ MATCHES_CACHE_COLUMNS = [
     "team2_en",
     "team1_ar",
     "team2_ar",
-    "team1_img",
-    "team2_img",
-    "links",
+    "link",
+    "channels",
     "kickoff_time",
     "duration",
     "status_class",
-    "is_ended",
-    "last_updated"
+    "last_updated",
+    "team1_img",
+    "team2_img"
 ]
 
 
@@ -208,7 +208,8 @@ def fetch_matches_cache(client, spreadsheet_name: str = "Streaming Dashboard") -
         team2_ar = padded_row[header_map["team2_ar"]].strip() if "team2_ar" in header_map else ""
         team1_img = padded_row[header_map["team1_img"]].strip() if "team1_img" in header_map else ""
         team2_img = padded_row[header_map["team2_img"]].strip() if "team2_img" in header_map else ""
-        links = padded_row[header_map["links"]].strip() if "links" in header_map else ""
+        link = padded_row[header_map["link"]].strip() if "link" in header_map else ""
+        channels = padded_row[header_map["channels"]].strip() if "channels" in header_map else ""
         k_time = padded_row[header_map["kickoff_time"]].strip() if "kickoff_time" in header_map else ""
 
         duration_raw = padded_row[header_map["duration"]].strip() if "duration" in header_map else "180"
@@ -217,17 +218,9 @@ def fetch_matches_cache(client, spreadsheet_name: str = "Streaming Dashboard") -
         except ValueError:
             duration = 180
 
-        s_class = padded_row[header_map["status_class"]].strip().lower() if "status_class" in header_map else "not-started"
-        if not s_class:
-            s_class = "not-started"
-
-        is_ended_raw = padded_row[header_map["is_ended"]].strip().lower() if "is_ended" in header_map else (
-            padded_row[header_map["ended"]].strip().lower() if "ended" in header_map else ""
-        )
-        if is_ended_raw:
-            is_ended = is_ended_raw in ["true", "1", "yes"]
-        else:
-            is_ended = s_class == "finished"
+        s_class = padded_row[header_map["status_class"]].strip().lower() if "status_class" in header_map else "upcoming"
+        if s_class not in ["live", "upcoming", "finished"]:
+            s_class = "upcoming"
 
         l_updated = padded_row[header_map["last_updated"]].strip() if "last_updated" in header_map else ""
 
@@ -252,11 +245,11 @@ def fetch_matches_cache(client, spreadsheet_name: str = "Streaming Dashboard") -
             "team2_ar": team2_ar,
             "team1_img": team1_img,
             "team2_img": team2_img,
-            "links": links,
+            "link": link,
+            "channels": channels,
             "kickoff_time": k_time,
             "duration": duration,
             "status_class": s_class,
-            "is_ended": is_ended,
             "last_updated": l_updated,
         }
     return matches_cache
@@ -283,8 +276,9 @@ def _filter_valid_cache_rows(matches_cache: dict, now: datetime, now_local_str: 
                 logger.warning(f"Sheets: Failed to parse cache time '{last_updated_str}': {e}")
                 out_time_str = now_local_str
 
-        status_class = data.get("status_class", "not-started")
-        is_ended = bool(data.get("is_ended", data.get("ended", status_class == "finished")))
+        status_class = data.get("status_class", "upcoming").strip().lower()
+        if status_class not in ["live", "upcoming", "finished"]:
+            status_class = "upcoming"
 
         row = [
             data.get("event_id", event_id),
@@ -292,14 +286,14 @@ def _filter_valid_cache_rows(matches_cache: dict, now: datetime, now_local_str: 
             data.get("team2_en", ""),
             data.get("team1_ar", ""),
             data.get("team2_ar", ""),
-            data.get("team1_img", ""),
-            data.get("team2_img", ""),
-            data.get("links", ""),
+            data.get("link", ""),
+            data.get("channels", ""),
             format_to_human_time(str(data.get("kickoff_time", ""))),
             duration,
             status_class,
-            "TRUE" if is_ended else "FALSE",
-            out_time_str
+            out_time_str,
+            data.get("team1_img", ""),
+            data.get("team2_img", "")
         ]
         valid_cache_rows.append(row)
 
@@ -328,7 +322,7 @@ def save_matches_cache(client, matches_cache: dict, spreadsheet_name: str = "Str
 
     valid_cache_rows = _filter_valid_cache_rows(matches_cache, now, now_local_str)
 
-    # Smart change detection: compare existing data cells with new rows (ignoring timestamp column)
+    # Smart change detection: compare existing data cells with new rows (ignoring timestamp column at index 10)
     try:
         all_values = worksheet.get_all_values()
         if all_values and len(all_values) > 1:
@@ -343,12 +337,12 @@ def save_matches_cache(client, matches_cache: dict, spreadsheet_name: str = "Str
                 logger.info(f"Cache: Remove {count} expired match{'es' if count != 1 else ''} from cache.")
 
             existing_rows_data = [
-                [str(cell).strip() for cell in row[:12]]
+                [str(cell).strip() for idx, cell in enumerate(row) if idx != 10]
                 for row in all_values[1:]
                 if any(str(cell).strip() for cell in row)
             ]
             new_rows_data = [
-                [str(cell).strip() for cell in row[:12]]
+                [str(cell).strip() for idx, cell in enumerate(row) if idx != 10]
                 for row in valid_cache_rows
             ]
             if existing_rows_data == new_rows_data:
@@ -364,4 +358,93 @@ def save_matches_cache(client, matches_cache: dict, spreadsheet_name: str = "Str
     return True
 
 
+DOMAIN_CACHE_COLUMNS = ["domain", "status", "failure_reason", "last_tested"]
 
+_DOMAIN_CACHE_SHEET = "_cache_domains"
+
+_PRE_SEEDED_DOMAINS = {
+    "youtube.com": {"status": "OK", "failure_reason": "--", "last_tested": "pre-seeded"},
+    "youtu.be":    {"status": "OK", "failure_reason": "--", "last_tested": "pre-seeded"},
+    "ok.ru":       {"status": "OK", "failure_reason": "--", "last_tested": "pre-seeded"},
+    "yasirtv.com": {"status": "OK", "failure_reason": "--", "last_tested": "pre-seeded"},
+}
+
+
+def load_domain_cache(client: gspread.Client, spreadsheet_name: str = "Streaming Dashboard") -> dict:
+    """Loads the domain validation cache from the '_cache_domains' worksheet.
+
+    Returns a dict keyed by registered domain:
+        {
+            "embed1.top":      {"status": "OK",  "failure_reason": "--",               "last_tested": "30 Aug - 16:00"},
+            "merithotdog.net": {"status": "NO",  "failure_reason": "SANDBOX_REJECTED", "last_tested": "..."},
+            "somesite.com":    {"status": "--",  "failure_reason": "TIMEOUT",          "last_tested": "..."},
+        }
+    If duplicate rows exist for the same domain, the last row wins.
+    If the sheet is empty or newly created, it auto-seeds known-good domains.
+    """
+    sh = open_spreadsheet(client, spreadsheet_name)
+    try:
+        worksheet = sh.worksheet(_DOMAIN_CACHE_SHEET)
+    except gspread.exceptions.WorksheetNotFound:
+        worksheet = sh.add_worksheet(title=_DOMAIN_CACHE_SHEET, rows="500", cols="4")
+        worksheet.append_row(DOMAIN_CACHE_COLUMNS)
+        logger.info(f"Sheets: Created '{_DOMAIN_CACHE_SHEET}' worksheet with headers.")
+
+    all_values = worksheet.get_all_values()
+    if not all_values or len(all_values) <= 1:
+        rows = [
+            [d, data["status"], data["failure_reason"], data["last_tested"]]
+            for d, data in sorted(_PRE_SEEDED_DOMAINS.items())
+        ]
+        try:
+            worksheet.clear()
+            worksheet.update([DOMAIN_CACHE_COLUMNS] + rows)
+            logger.info(f"Sheets: Auto-seeded '{_DOMAIN_CACHE_SHEET}' with {len(rows)} trusted domains.")
+        except Exception as ex:
+            logger.warning(f"Sheets: Failed to auto-seed '{_DOMAIN_CACHE_SHEET}': {ex}")
+        return dict(_PRE_SEEDED_DOMAINS)
+
+    headers = [h.strip().lower() for h in all_values[0]]
+    header_map = {h: idx for idx, h in enumerate(headers)}
+
+    cache = {}
+    for row in all_values[1:]:
+        padded = row + [""] * (len(headers) - len(row))
+        domain = padded[header_map.get("domain", 0)].strip().lower()
+        if not domain:
+            continue
+        cache[domain] = {
+            "status":         padded[header_map.get("status", 1)].strip(),
+            "failure_reason": padded[header_map.get("failure_reason", 2)].strip() or "--",
+            "last_tested":    padded[header_map.get("last_tested", 3)].strip(),
+        }
+
+    logger.success(f"Sheets: Loaded {len(cache)} domain cache entries from '{_DOMAIN_CACHE_SHEET}'.")
+    return cache
+
+
+def save_domain_cache(client: gspread.Client, cache: dict, spreadsheet_name: str = "Streaming Dashboard") -> None:
+    """Rewrites the '_cache_domains' worksheet with one row per domain, sorted alphabetically.
+
+    Eliminates any duplicate rows that may have accumulated from manual editing.
+    Only called when the in-memory cache has been modified during the current pipeline run.
+    """
+    sh = open_spreadsheet(client, spreadsheet_name)
+    try:
+        worksheet = sh.worksheet(_DOMAIN_CACHE_SHEET)
+    except gspread.exceptions.WorksheetNotFound:
+        worksheet = sh.add_worksheet(title=_DOMAIN_CACHE_SHEET, rows="500", cols="4")
+
+    rows = []
+    for domain in sorted(cache.keys()):
+        entry = cache[domain]
+        rows.append([
+            domain,
+            entry.get("status", "--"),
+            entry.get("failure_reason", "--"),
+            entry.get("last_tested", "--"),
+        ])
+
+    worksheet.clear()
+    worksheet.update([DOMAIN_CACHE_COLUMNS] + rows)
+    logger.success(f"Sheets: Saved {len(rows)} domain entries to '{_DOMAIN_CACHE_SHEET}'.")

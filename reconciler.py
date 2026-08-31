@@ -1,4 +1,5 @@
-from utils import get_slot_label, get_event_display_name
+import patcher
+from utils import get_slot_label, get_event_display_name, format_to_human_time
 
 
 def _get_slot_identifier(slot: dict) -> str:
@@ -74,22 +75,40 @@ def _free_unmatched_slots(to_be_freed: list, reassigned_slots: set, actions: lis
             })
 
 
-def _evaluate_matched_slots(active_matched: list, scraped_map: dict, actions: list):
+def _evaluate_matched_slots(active_matched: list, scraped_map: dict, actions: list, matches_cache: dict = None):
     """Checks if matched active slots require stream channel updates or metadata sync."""
     for slot in active_matched:
-        event = scraped_map[slot["event_id"]]
+        ev_id = slot["event_id"]
+        event = scraped_map[ev_id]
         event_name = get_event_display_name(event)
         slot_label = get_slot_label(slot)
 
-        actions.append({
-            "action_type": "sync_channels",
-            "slot": slot,
-            "event": event,
-            "message": f"Checking/syncing stream channels for {slot_label} ('{event_name}')"
-        })
+        current_payload = patcher.encode_channels_payload(event.get("channels", []))
+        cached_payload = matches_cache.get(ev_id, {}).get("channels", "") if matches_cache else ""
+        channels_changed = (current_payload != cached_payload) if cached_payload else True
+
+        if channels_changed:
+            actions.append({
+                "action_type": "sync_channels",
+                "slot": slot,
+                "event": event,
+                "message": f"Update stream channels for {slot_label} ('{event_name}')"
+            })
+        else:
+            sheet_name = slot.get("event_name", "").strip()
+            sheet_kickoff = slot.get("kickoff_time", "").strip()
+            expected_name = get_event_display_name(event)
+            expected_kickoff = format_to_human_time(event["time"])
+            if sheet_name != expected_name or sheet_kickoff != expected_kickoff:
+                actions.append({
+                    "action_type": "update_sheet_only",
+                    "slot": slot,
+                    "event": event,
+                    "message": f"Update metadata for {slot_label} ('{event_name}')"
+                })
 
 
-def reconcile_state(sheet_slots: list, scraped_events: list) -> list:
+def reconcile_state(sheet_slots: list, scraped_events: list, matches_cache: dict = None) -> list:
     """
     Compares the Google Sheet slot states with the scraped live events.
     Limits candidate events to the available slot capacity, excluding finished matches.
@@ -116,7 +135,7 @@ def reconcile_state(sheet_slots: list, scraped_events: list) -> list:
 
     _assign_unassigned_events(unassigned_events, free_slots_queue, to_be_freed, actions, reassigned_slots)
     _free_unmatched_slots(to_be_freed, reassigned_slots, actions)
-    _evaluate_matched_slots(active_matched, scraped_map, actions)
+    _evaluate_matched_slots(active_matched, scraped_map, actions, matches_cache)
 
     return actions
 

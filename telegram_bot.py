@@ -95,9 +95,9 @@ def _handle_end_command(arg: str, chat_id: int, bot_token: str, spreadsheet_name
     matches_cache = sheets_module.fetch_matches_cache(clients["sheets"], spreadsheet_name)
     if event_id in matches_cache:
         matches_cache[event_id].update({
-            "links": "",
+            "link": "",
+            "channels": "",
             "status_class": "finished",
-            "is_ended": True,
             "last_updated": datetime.now().isoformat()
         })
     else:
@@ -110,11 +110,11 @@ def _handle_end_command(arg: str, chat_id: int, bot_token: str, spreadsheet_name
             "team2_ar": t2_ar,
             "team1_img": found_match['team1'].get('img', ''),
             "team2_img": found_match['team2'].get('img', ''),
-            "links": "",
+            "link": "",
+            "channels": "",
             "kickoff_time": kickoff_time,
             "duration": int(found_match.get("duration", 180)),
             "status_class": "finished",
-            "is_ended": True,
             "last_updated": datetime.now().isoformat()
         }
     sheets_module.save_matches_cache(clients["sheets"], matches_cache, spreadsheet_name)

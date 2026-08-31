@@ -6,6 +6,19 @@ from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 import logger
 
+PLACEHOLDER_IMAGE_URL = "https://placehold.co/300x300?text=*"
+
+
+def sanitize_sheet_image_url(url: str) -> str:
+    """Returns empty string if URL is empty, whitespace, or equal to the fallback placeholder."""
+    if not url:
+        return ""
+    u = str(url).strip()
+    if u == PLACEHOLDER_IMAGE_URL:
+        return ""
+    return u
+
+
 def get_default_timezone() -> ZoneInfo:
     """
     Returns the target application timezone as a ZoneInfo object.
@@ -261,19 +274,57 @@ def parse_user_styled_time(time_str: str) -> datetime:
     return datetime.min
 
 
-def is_match_expired(kickoff_time: str | datetime, duration: int | str, now_dt: datetime, grace_minutes: int = 180) -> bool:
+def get_match_lookahead_hours() -> float:
+    """Returns MATCH_LOOKAHEAD_HOURS env var as float (default 24.0)."""
+    val = os.environ.get("MATCH_LOOKAHEAD_HOURS", "").strip()
+    try:
+        return float(val) if val else 24.0
+    except ValueError:
+        return 24.0
+
+
+def get_stream_resolve_lookahead_minutes() -> int:
+    """Returns STREAM_RESOLVE_LOOKAHEAD_MINUTES env var as int (default 60)."""
+    val = os.environ.get("STREAM_RESOLVE_LOOKAHEAD_MINUTES", "").strip()
+    try:
+        return int(val) if val else 60
+    except ValueError:
+        return 60
+
+
+def get_match_expiry_grace_minutes() -> int:
+    """Returns MATCH_EXPIRY_GRACE_MINUTES env var as int (default 180)."""
+    val = os.environ.get("MATCH_EXPIRY_GRACE_MINUTES", "").strip()
+    try:
+        return int(val) if val else 180
+    except ValueError:
+        return 180
+
+
+def get_match_default_duration_minutes() -> int:
+    """Returns MATCH_DEFAULT_DURATION_MINUTES env var as int (default 180)."""
+    val = os.environ.get("MATCH_DEFAULT_DURATION_MINUTES", "").strip()
+    try:
+        return int(val) if val else 180
+    except ValueError:
+        return 180
+
+
+def is_match_expired(kickoff_time: str | datetime, duration: int | str, now_dt: datetime, grace_minutes: int = None) -> bool:
     """
     Returns True if the current time is at or past the match expiration time (Kickoff + Duration + Grace Period).
     """
+    if grace_minutes is None:
+        grace_minutes = get_match_expiry_grace_minutes()
     if not kickoff_time:
         return False
     dt = kickoff_time if isinstance(kickoff_time, datetime) else parse_user_styled_time(kickoff_time)
     if dt == datetime.min:
         return False
     try:
-        duration_mins = int(duration) if duration else 180
+        duration_mins = int(duration) if duration else get_match_default_duration_minutes()
     except (ValueError, TypeError):
-        duration_mins = 180
+        duration_mins = get_match_default_duration_minutes()
     expiry_dt = dt + timedelta(minutes=duration_mins + grace_minutes)
     return now_dt >= expiry_dt
 
@@ -288,17 +339,63 @@ def is_match_ended(kickoff_time: str | datetime, duration: int | str, now_dt: da
     if dt == datetime.min:
         return False
     try:
-        duration_mins = int(duration) if duration else 180
+        duration_mins = int(duration) if duration else get_match_default_duration_minutes()
     except (ValueError, TypeError):
-        duration_mins = 180
+        duration_mins = get_match_default_duration_minutes()
     end_dt = dt + timedelta(minutes=duration_mins)
     return now_dt >= end_dt
+
+
+def is_match_in_24h_window(kickoff_time: str | datetime, now_dt: datetime, max_hours: float = None) -> bool:
+    """
+    Returns True if a match's scheduled kickoff is within max_hours (or in the past/live).
+    Returns False if scheduled more than max_hours into the future.
+    """
+    if max_hours is None:
+        max_hours = get_match_lookahead_hours()
+    if not kickoff_time:
+        return True
+    dt = kickoff_time if isinstance(kickoff_time, datetime) else parse_user_styled_time(kickoff_time)
+    if dt == datetime.min:
+        return True
+    time_diff_seconds = (dt - now_dt).total_seconds()
+    return time_diff_seconds <= max_hours * 3600
+
+
+def is_match_starting_soon(
+    kickoff_time: str | datetime,
+    now_dt: datetime,
+    status_class: str = "",
+    threshold_minutes: int = None
+) -> bool:
+    """
+    Returns True if a match is either currently LIVE or scheduled to start soon (within threshold_minutes).
+    Returns False if the match is finished or scheduled further in the future (> threshold_minutes away).
+    """
+    if threshold_minutes is None:
+        threshold_minutes = get_stream_resolve_lookahead_minutes()
+
+    s_class = (status_class or "").strip().lower()
+    if s_class == "finished":
+        return False
+    if s_class == "live":
+        return True
+
+    if not kickoff_time:
+        return False
+    dt = kickoff_time if isinstance(kickoff_time, datetime) else parse_user_styled_time(kickoff_time)
+    if dt == datetime.min:
+        return False
+
+    time_until_kickoff = (dt - now_dt).total_seconds()
+    # Match starting within threshold_minutes (e.g. 60m) or match already kicked off (<= 0)
+    return time_until_kickoff <= threshold_minutes * 60
 
 def get_status_priority(status: str) -> int:
     """Returns numeric priority for match status. Higher value = higher priority."""
     if status == "live":
         return 2
-    if status == "not-started":
+    if status == "upcoming":
         return 1
     return 0
 

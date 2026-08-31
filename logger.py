@@ -30,23 +30,23 @@ def step_header(step_num: str, title: str):
 
 def info(message: str, indent: int = 2):
     spaces = " " * indent
-    print(f"{spaces}{COLOR_BLUE}ℹ{COLOR_RESET}  {message}")
+    print(f"{spaces}{COLOR_BLUE}ℹ{COLOR_RESET}  {message}", flush=True)
 
 def success(message: str, indent: int = 2):
     spaces = " " * indent
-    print(f"{spaces}{COLOR_GREEN}✔{COLOR_RESET}  {COLOR_BOLD}{message}{COLOR_RESET}")
+    print(f"{spaces}{COLOR_GREEN}✔{COLOR_RESET}  {COLOR_BOLD}{message}{COLOR_RESET}", flush=True)
 
 def warning(message: str, indent: int = 2):
     spaces = " " * indent
-    print(f"{spaces}{COLOR_YELLOW}⚠{COLOR_RESET}  {message}")
+    print(f"{spaces}{COLOR_YELLOW}⚠{COLOR_RESET}  {message}", flush=True)
 
 def error(message: str, indent: int = 2):
     spaces = " " * indent
-    print(f"{spaces}{COLOR_RED}✘{COLOR_RESET}  {COLOR_BOLD}{message}{COLOR_RESET}", file=sys.stderr)
+    print(f"{spaces}{COLOR_RED}✘{COLOR_RESET}  {COLOR_RED}{COLOR_BOLD}{message}{COLOR_RESET}", flush=True)
 
 def item(message: str, indent: int = 2):
     spaces = " " * indent
-    print(f"{spaces}{COLOR_CYAN}➤{COLOR_RESET}  {message}")
+    print(f"{spaces}{COLOR_CYAN}➤{COLOR_RESET}  {message}", flush=True)
 
 def action(action_type: str, message: str, indent: int = 2):
     """Prints a styled reconciliation action line."""

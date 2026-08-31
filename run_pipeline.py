@@ -21,6 +21,7 @@ load_env()
 import sheets_module
 import blogger_module
 import logger
+import channel_resolver
 from steps import (
     verify_services,
     fetch_slots,
@@ -64,6 +65,50 @@ def _init_clients():
         raise PipelineAbortError("BLOGGER API CLIENT INITIALIZATION FAILED", str(e))
 
     return sheets_client, blogger_session
+
+
+def _send_domain_alerts(alerts: list, public_posts_map: dict, telegram_token: str, chat_ids: list, slots: list = None) -> None:
+    """Sends a single batch Telegram notification for all '--' iframe domains found this run.
+
+    Each alert is enriched with the public Blogger post URL (now available after Step 5).
+    If there are no alerts, nothing is sent.
+    """
+    if not alerts or not telegram_token or not chat_ids:
+        return
+
+    lines = []
+    for i, alert in enumerate(alerts, start=1):
+        domain       = alert.get("domain", "unknown")
+        match_name   = alert.get("match_name", "Unknown Match")
+        channel_name = alert.get("channel_name", "Unknown Channel")
+        blog_post_id = alert.get("blog_post_id", "")
+        event_id     = alert.get("event_id", "")
+
+        # Look up blog_post_id from slots if not directly attached to the alert
+        if not blog_post_id and event_id and slots:
+            for s in slots:
+                if s.get("event_id") == event_id:
+                    blog_post_id = s.get("blog_post_id", "")
+                    break
+
+        # Enrich with post URL now that public_posts_map is fully populated.
+        post_url = ""
+        if blog_post_id and blog_post_id in public_posts_map:
+            post_url = public_posts_map[blog_post_id].get("url", "")
+
+        line = f"{i}. {domain}\n   Match: {match_name}\n   Channel: {channel_name}"
+        if post_url:
+            line += f"\n   🔗 {post_url}"
+        lines.append(line)
+
+    body = "\n\n".join(lines)
+    message = (
+        "⚠️ Unverified iframe domains — Human Review Needed\n\n"
+        f"{body}\n\n"
+        "Open _cache_domains in Sheets and set each to OK or NO."
+    )
+    broadcast_telegram(telegram_token, chat_ids, message)
+    logger.info(f"Telegram: Sent domain alert for {len(alerts)} unverified domain(s).")
 
 
 def main():
@@ -121,6 +166,7 @@ def main():
             logger.info(f"Active matches formatted for the data website ({len(active_matches_list)} matches):")
             sync_data.display_data_matches(active_matches_list)
             sync_data.sync_data_page(blogger_session, BLOG_DATA_ID, DATA_PAGE_ID, matches_cache, skip_display=True, active_matches_list=active_matches_list)
+            channel_resolver.flush_domain_cache(sheets_client, args.sheet)
             logger.pipeline_end("Stream pipeline completed safely (0 matches scheduled, cache synced)", is_error=False)
             return
 
@@ -128,7 +174,7 @@ def main():
         logger.step_header("5/6", "Reconciling & updating slots")
         all_changed_slots, slot_actions, public_posts_map = reconcile_slots.run(
             blogger_session, valid_slots, newly_invalid_slots, restored_slots,
-            scraped_events, BLOG_ID, BLOG_PLAYER_ID
+            scraped_events, BLOG_ID, BLOG_PLAYER_ID, matches_cache
         )
 
         # Step 6: Syncing DB & updating data website
@@ -138,6 +184,19 @@ def main():
             scraped_events, matches_cache, public_posts_map, slot_actions,
             args.sheet, BLOG_ID, BLOG_DATA_ID, DATA_PAGE_ID,
             telegram_token, send_report_chat_ids
+        )
+
+        # Flush any new domain validator results to the _cache_domains sheet.
+        channel_resolver.flush_domain_cache(sheets_client, args.sheet)
+
+        # Send one batch Telegram alert for all '--' (inconclusive) domains discovered this run.
+        # Post URLs are now fully known from public_posts_map (populated in Step 5).
+        _send_domain_alerts(
+            channel_resolver.get_pending_alerts(),
+            public_posts_map,
+            telegram_token,
+            allowed_chat_ids,
+            slots=slots,
         )
 
         logger.pipeline_end("Stream pipeline completed successfully", is_error=False)

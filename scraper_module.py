@@ -19,11 +19,18 @@ from utils import (
     resolve_timezone,
     is_match_expired,
     is_match_ended,
+    is_match_in_24h_window,
+    is_match_starting_soon,
+    get_match_default_duration_minutes,
     DEFAULT_HEADERS,
+    PLACEHOLDER_IMAGE_URL,
+    sanitize_sheet_image_url,
 )
 
 from translation_manager import find_existing_translation, resolve_missing_teams
-from iframe_resolver import resolve_match_channels
+import channel_resolver
+from channel_resolver import resolve_match_channels
+import patcher
 from scrapers import SCRAPER_PLUGINS
 from normalization import (
     are_arabic_names_equivalent,
@@ -100,10 +107,28 @@ def migrate_matches_cache_translations(matches_cache: dict, team_translations: d
         t1_info = find_existing_translation(t1_ar, team_translations) if t1_ar else None
         t2_info = find_existing_translation(t2_ar, team_translations) if t2_ar else None
 
+        # Cross-type guard: Clubs and National teams cannot play each other
+        if t1_info and t2_info:
+            t1_is_club = t1_info.get("type") == "club" and t1_info.get("nameEn") not in ("Unknown", "", None)
+            t2_is_club = t2_info.get("type") == "club" and t2_info.get("nameEn") not in ("Unknown", "", None)
+            t1_is_nat = t1_info.get("type") == "national" or bool(t1_info.get("code"))
+            t2_is_nat = t2_info.get("type") == "national" or bool(t2_info.get("code"))
+            if t1_is_club and t2_is_nat:
+                t2_info = {"nameEn": "Unknown", "code": "", "type": "club", "primary_arabic": t2_ar, "logo_url": ""}
+            elif t2_is_club and t1_is_nat:
+                t1_info = {"nameEn": "Unknown", "code": "", "type": "club", "primary_arabic": t1_ar, "logo_url": ""}
+
         t1_en = t1_info.get("nameEn", "") if t1_info else cached_match.get("team1_en", "")
         t2_en = t2_info.get("nameEn", "") if t2_info else cached_match.get("team2_en", "")
-        t1_img = t1_info.get("logo_url") if (t1_info and t1_info.get("logo_url")) else cached_match.get("team1_img", "")
-        t2_img = t2_info.get("logo_url") if (t2_info and t2_info.get("logo_url")) else cached_match.get("team2_img", "")
+        if t1_info and (t1_info.get("type") == "national" or t1_info.get("code")):
+            t1_img = t1_info.get("logo_url") or cached_match.get("team1_img", "").strip() or PLACEHOLDER_IMAGE_URL
+        else:
+            t1_img = cached_match.get("team1_img", "").strip() or PLACEHOLDER_IMAGE_URL
+
+        if t2_info and (t2_info.get("type") == "national" or t2_info.get("code")):
+            t2_img = t2_info.get("logo_url") or cached_match.get("team2_img", "").strip() or PLACEHOLDER_IMAGE_URL
+        else:
+            t2_img = cached_match.get("team2_img", "").strip() or PLACEHOLDER_IMAGE_URL
 
         raw_k_time = str(cached_match.get("kickoff_time", "")).strip()
         kickoff_iso = ""
@@ -148,8 +173,8 @@ def migrate_matches_cache_translations(matches_cache: dict, team_translations: d
             if new_event_id in matches_cache:
                 # Merge into existing target entry if duplicate already exists
                 existing = matches_cache[new_event_id]
-                if not existing.get("links") and cached_match.get("links"):
-                    existing["links"] = cached_match["links"]
+                if not existing.get("link") and cached_match.get("link"):
+                    existing["link"] = cached_match["link"]
                 del matches_cache[old_event_id]
                 logger.info(f"Translation: Merged duplicate match '{old_event_id}' into '{new_event_id}' ({new_event_name})")
             else:
@@ -188,8 +213,8 @@ def migrate_matches_cache_translations(matches_cache: dict, team_translations: d
 
         if duplicate_target_id:
             target = cleaned_cache[duplicate_target_id]
-            if not target.get("links") and match.get("links"):
-                target["links"] = match["links"]
+            if not target.get("link") and match.get("link"):
+                target["link"] = match["link"]
             if target.get("status_class") != "live" and match.get("status_class") == "live":
                 target["status_class"] = "live"
             logger.info(f"Cache: Consolidated duplicate match '{ev_id}' into '{duplicate_target_id}'")
@@ -241,7 +266,7 @@ def _fetch_single_url_matches(url: str, source_tz, clean_url: str, max_url_len: 
 
 
 def _is_duplicate_raw_match(match_data: dict, existing_matches: list) -> bool:
-    """Checks if a match was already scraped from another source using date and Arabic team equivalence."""
+    """Checks if a match was already scraped from another source using date and team equivalence."""
     d_new = match_data.get("date_str", "").strip()
     t1_new = match_data["team1_name"].strip()
     t2_new = match_data["team2_name"].strip()
@@ -249,8 +274,11 @@ def _is_duplicate_raw_match(match_data: dict, existing_matches: list) -> bool:
         if ex.get("date_str", "").strip() == d_new:
             ex_t1 = ex["team1_name"].strip()
             ex_t2 = ex["team2_name"].strip()
-            if (are_arabic_names_equivalent(t1_new, ex_t1) and are_arabic_names_equivalent(t2_new, ex_t2)) or \
-               (are_arabic_names_equivalent(t1_new, ex_t2) and are_arabic_names_equivalent(t2_new, ex_t1)):
+            match_t1_t1 = are_arabic_names_equivalent(t1_new, ex_t1) or are_english_teams_equivalent(t1_new, ex_t1)
+            match_t2_t2 = are_arabic_names_equivalent(t2_new, ex_t2) or are_english_teams_equivalent(t2_new, ex_t2)
+            match_t1_t2 = are_arabic_names_equivalent(t1_new, ex_t2) or are_english_teams_equivalent(t1_new, ex_t2)
+            match_t2_t1 = are_arabic_names_equivalent(t2_new, ex_t1) or are_english_teams_equivalent(t2_new, ex_t1)
+            if (match_t1_t1 and match_t2_t2) or (match_t1_t2 and match_t2_t1):
                 return True
     return False
 
@@ -283,15 +311,26 @@ def _fetch_and_parse_urls(urls_to_scrape: list) -> tuple[list, set]:
     if not matches_to_process and errors:
         raise ConnectionError("; ".join(errors))
 
-    logger.info(f"Scraper: Processing {len(matches_to_process)} total matches...")
     return matches_to_process, unique_team_names
 
 
 
 def _build_match_event(match_data: dict, team_translations: dict, matches_cache: dict, now_dt: datetime, proxies: dict) -> tuple:
     t1_name, t2_name = match_data["team1_name"], match_data["team2_name"]
-    t1_info = team_translations.get(t1_name) or {"nameEn": "Unknown", "code": ""}
-    t2_info = team_translations.get(t2_name) or {"nameEn": "Unknown", "code": ""}
+    t1_info = team_translations.get(t1_name) or {"nameEn": "Unknown", "code": "", "type": "club"}
+    t2_info = team_translations.get(t2_name) or {"nameEn": "Unknown", "code": "", "type": "club"}
+
+    # Cross-type guard: Clubs and National teams cannot play each other
+    t1_is_club = t1_info.get("type") == "club" and t1_info.get("nameEn") not in ("Unknown", "", None)
+    t2_is_club = t2_info.get("type") == "club" and t2_info.get("nameEn") not in ("Unknown", "", None)
+    t1_is_nat = t1_info.get("type") == "national" or bool(t1_info.get("code"))
+    t2_is_nat = t2_info.get("type") == "national" or bool(t2_info.get("code"))
+    if t1_is_club and t2_is_nat:
+        logger.warning(f"Translation: Cross-type collision '{t1_name}' (Club) vs '{t2_name}' (National). Demoting '{t2_name}' to club.")
+        t2_info = {"nameEn": "Unknown", "code": "", "type": "club", "primary_arabic": t2_name, "logo_url": ""}
+    elif t2_is_club and t1_is_nat:
+        logger.warning(f"Translation: Cross-type collision '{t1_name}' (National) vs '{t2_name}' (Club). Demoting '{t1_name}' to club.")
+        t1_info = {"nameEn": "Unknown", "code": "", "type": "club", "primary_arabic": t1_name, "logo_url": ""}
 
     team1_en = t1_info.get("nameEn", "")
     team2_en = t2_info.get("nameEn", "")
@@ -302,24 +341,25 @@ def _build_match_event(match_data: dict, team_translations: dict, matches_cache:
 
     match_url = match_data["match_url"]
     cached_match = matches_cache.get(event_id) if event_id else None
-    status_class = match_data["status_class"]
+    status_class = match_data.get("status_class", "upcoming")
+    if status_class not in ["live", "upcoming", "finished"]:
+        status_class = "upcoming"
+
     # Only force finished if explicitly marked finished by user via Telegram
     if cached_match and cached_match.get("status_class") == "finished":
         status_class = "finished"
 
-    kickoff_dt = datetime.min
-    try:
-        kickoff_dt = datetime.fromisoformat(strip_timezone(formatted_time))
-    except Exception as e:
-        logger.warning(f"Failed to parse kickoff time for match '{event_id}': {e}")
+    # Ignore matches scheduled more than 24 hours into the future
+    if not is_match_in_24h_window(formatted_time, now_dt):
+        return None, {}
 
-    is_far_future = False
-    if status_class == "not-started" and kickoff_dt != datetime.min:
-        time_until_kickoff = (kickoff_dt - now_dt).total_seconds()
-        if time_until_kickoff > 24 * 3600:
-            return None, {}
-        if time_until_kickoff > 1 * 3600:
-            is_far_future = True
+    # Check if match is starting soon (<= 60m) or live to decide whether to extract stream channels
+    is_soon = is_match_starting_soon(formatted_time, now_dt, status_class=status_class, threshold_minutes=60)
+    is_far_future = not is_soon and status_class == "upcoming"
+
+    t1_display = team1_en or (t1_info.get("primary_arabic") or match_data["team1_name"])
+    t2_display = team2_en or (t2_info.get("primary_arabic") or match_data["team2_name"])
+    match_display_name = f"{t1_display} vs {t2_display}" if (t1_display and t2_display) else event_id
 
     channels = []
     if status_class != "finished" and match_url:
@@ -328,16 +368,28 @@ def _build_match_event(match_data: dict, team_translations: dict, matches_cache:
             status_class=status_class,
             is_far_future=is_far_future,
             plugin_name=match_data.get("plugin", ""),
-            proxies=proxies
+            proxies=proxies,
+            context={"match_name": match_display_name, "event_id": event_id},
         )
 
     team1_ar = t1_info.get("primary_arabic") or match_data["team1_name"]
     team2_ar = t2_info.get("primary_arabic") or match_data["team2_name"]
-    team1_img = match_data["team1_orig_img"] or t1_info.get("logo_url", "")
-    team2_img = match_data["team2_orig_img"] or t2_info.get("logo_url", "")
 
-    is_ended = status_class == "finished"
-    existing_links = "" if is_ended else (cached_match.get("links", "") if cached_match else "")
+    # Logo resolution:
+    # - National teams: prioritize high-quality vector flags from cache (FlagCDN), fallback to scraped image or placeholder
+    # - Clubs: ALWAYS use scraped images (NEVER use cache URLs). Fallback to placeholder if missing.
+    if t1_info.get("type") == "national" or t1_info.get("code"):
+        team1_img = t1_info.get("logo_url") or match_data.get("team1_orig_img", "").strip() or PLACEHOLDER_IMAGE_URL
+    else:
+        team1_img = match_data.get("team1_orig_img", "").strip() or PLACEHOLDER_IMAGE_URL
+
+    if t2_info.get("type") == "national" or t2_info.get("code"):
+        team2_img = t2_info.get("logo_url") or match_data.get("team2_orig_img", "").strip() or PLACEHOLDER_IMAGE_URL
+    else:
+        team2_img = match_data.get("team2_orig_img", "").strip() or PLACEHOLDER_IMAGE_URL
+
+    existing_link = "" if status_class == "finished" else (cached_match.get("link", "") if cached_match else "")
+    channels_payload = patcher.encode_channels_payload(channels) if channels else ""
 
     event = {
         "event_id": event_id,
@@ -352,9 +404,9 @@ def _build_match_event(match_data: dict, team_translations: dict, matches_cache:
             "img": team2_img
         },
         "time": formatted_time,
-        "duration": 180,
+        "duration": get_match_default_duration_minutes(),
         "channels": channels,
-        "link": existing_links,
+        "link": existing_link,
         "status_class": status_class,
         "match_url": match_url
     }
@@ -369,11 +421,11 @@ def _build_match_event(match_data: dict, team_translations: dict, matches_cache:
             "team2_ar": team2_ar,
             "team1_img": team1_img,
             "team2_img": team2_img,
-            "links": existing_links,
+            "link": existing_link,
+            "channels": channels_payload or (cached_match.get("channels", "") if cached_match else ""),
             "kickoff_time": format_to_human_time(formatted_time),
-            "duration": 180,
+            "duration": get_match_default_duration_minutes(),
             "status_class": status_class,
-            "is_ended": is_ended,
             "last_updated": now_dt.isoformat()
         }
     }
@@ -383,15 +435,44 @@ def _build_match_event(match_data: dict, team_translations: dict, matches_cache:
 def _process_matches(matches_to_process: list, team_translations: dict, matches_cache: dict, now_dt: datetime, proxies: dict) -> tuple:
     parsed_matches_map = {}
     updated_matches_cache = {}
-    if matches_to_process:
-        logger.info(f"Scraper: Resolving stream channels for {len(matches_to_process)} matches...")
+
+    active_channel_matches = sum(
+        1 for m in matches_to_process
+        if m.get("match_url") and is_match_starting_soon(
+            parse_match_time(m.get("date_str", ""), m.get("time_str", ""), source_tz=m.get("source_tz")),
+            now_dt,
+            status_class=m.get("status_class", ""),
+            threshold_minutes=60,
+        )
+    )
+
+    if active_channel_matches > 0:
+        match_str = f"{active_channel_matches} match live / starting soon" if active_channel_matches == 1 else f"{active_channel_matches} matches live / starting soon"
+        logger.item(f"Scraper: Resolving stream channels for {match_str}...")
+    elif matches_to_process:
+        logger.info(f"Scraper: No matches are live or starting soon. {logger.COLOR_DARK_GRAY}Skipping stream channel resolution.{logger.COLOR_RESET}")
 
     for match_data in matches_to_process:
         event, cache_entry = _build_match_event(match_data, team_translations, matches_cache, now_dt, proxies)
         if event is not None:
             ev_id = event["event_id"]
+            existing_target_id = None
             if ev_id in parsed_matches_map:
-                existing_ev = parsed_matches_map[ev_id]
+                existing_target_id = ev_id
+            else:
+                for exist_id, exist_ev in parsed_matches_map.items():
+                    if exist_ev.get("time") == event.get("time"):
+                        t1_a = event["team1"]["nameEn"] or event["team1"]["nameAr"]
+                        t2_a = event["team2"]["nameEn"] or event["team2"]["nameAr"]
+                        t1_b = exist_ev["team1"]["nameEn"] or exist_ev["team1"]["nameAr"]
+                        t2_b = exist_ev["team2"]["nameEn"] or exist_ev["team2"]["nameAr"]
+                        if (are_english_teams_equivalent(t1_a, t1_b) and are_english_teams_equivalent(t2_a, t2_b)) or \
+                           (are_arabic_names_equivalent(t1_a, t1_b) and are_arabic_names_equivalent(t2_a, t2_b)):
+                            existing_target_id = exist_id
+                            break
+
+            if existing_target_id:
+                existing_ev = parsed_matches_map[existing_target_id]
                 if not existing_ev.get("channels") and event.get("channels"):
                     existing_ev["channels"] = event["channels"]
                 if event.get("status_class") == "live" and existing_ev.get("status_class") != "live":
@@ -400,20 +481,21 @@ def _process_matches(matches_to_process: list, team_translations: dict, matches_
                 parsed_matches_map[ev_id] = event
 
             # Prioritize 'live' status entries when merging cache entries for shared events
-            for ev_id, entry in cache_entry.items():
-                if ev_id in updated_matches_cache:
-                    existing_status = updated_matches_cache[ev_id].get("status_class")
+            target_key = existing_target_id or ev_id
+            for entry_id, entry in cache_entry.items():
+                if target_key in updated_matches_cache:
+                    existing_status = updated_matches_cache[target_key].get("status_class")
                     if existing_status == "live" and entry.get("status_class") != "live":
                         continue
-                updated_matches_cache[ev_id] = entry
+                updated_matches_cache[target_key] = entry
 
-    # Retain matches from previous cache that disappeared from competitor sources but haven't expired (3h post-match TTL)
+    # Retain matches from previous cache that disappeared from competitor sources but haven't expired
     if matches_cache:
         for ev_id, cached_entry in matches_cache.items():
             if ev_id not in updated_matches_cache:
                 k_time = cached_entry.get("kickoff_time", "")
-                duration = int(cached_entry.get("duration", 180))
-                if is_match_expired(k_time, duration, now_dt, grace_minutes=180):
+                duration = int(cached_entry.get("duration", get_match_default_duration_minutes()))
+                if is_match_expired(k_time, duration, now_dt):
                     continue
 
                 # Check if an equivalent match was already processed under another ID in this run
@@ -435,18 +517,23 @@ def _process_matches(matches_to_process: list, team_translations: dict, matches_
                     continue
 
                 retained_entry = dict(cached_entry)
-                # If match duration has passed (~135 min realistic duration) or it was marked finished, ensure it stays finished and link is cleared
-                if retained_entry.get("status_class") == "finished" or is_match_ended(k_time, min(duration, 135), now_dt):
+                # If match duration has passed or it was marked finished, ensure it stays finished and link is cleared
+                if retained_entry.get("status_class") == "finished" or is_match_ended(k_time, duration, now_dt):
                     retained_entry["status_class"] = "finished"
-                    retained_entry["is_ended"] = True
-                    retained_entry["links"] = ""
+                    retained_entry["link"] = ""
 
                 updated_matches_cache[ev_id] = retained_entry
 
     return list(parsed_matches_map.values()), updated_matches_cache
 
 
-def scrape_live_matches(team_translations: dict = None, matches_cache: dict = None, slots: list = None) -> tuple:
+def scrape_live_matches(
+    team_translations: dict = None,
+    matches_cache: dict = None,
+    slots: list = None,
+    sheets_client=None,
+    spreadsheet_name: str = None,
+) -> tuple:
     if team_translations is None:
         team_translations = {}
     if matches_cache is None:
@@ -461,7 +548,10 @@ def scrape_live_matches(team_translations: dict = None, matches_cache: dict = No
         return [], [], {}, []
 
     print()
-    logger.success(f"Translation: Loaded {len(team_translations)} team translations from cache.")
+    if sheets_client:
+        channel_resolver.init_domain_cache(sheets_client, spreadsheet_name or "Streaming Dashboard")
+    logger.success(f"Sheets: Loaded {len(team_translations)} team translations from cache.")
+    print()
 
     missing_team_names = []
     for name in unique_team_names:
@@ -473,20 +563,27 @@ def scrape_live_matches(team_translations: dict = None, matches_cache: dict = No
 
     new_translations_list, alias_updates = resolve_missing_teams(missing_team_names, team_translations, matches_to_process)
 
-    # Backfill missing logo URLs on existing cached teams using scraped match images
+    # Update logo URLs on existing cached club teams whenever fresh scraped images are found
     for m in matches_to_process:
-        for t_name, img in [(m["team1_name"], m.get("team1_orig_img", "")), (m["team2_name"], m.get("team2_orig_img", ""))]:
+        for t_name, orig_img in [
+            (m.get("team1_name", ""), m.get("team1_orig_img", "")),
+            (m.get("team2_name", ""), m.get("team2_orig_img", ""))
+        ]:
+            img = sanitize_sheet_image_url(orig_img)
+            if not t_name or not img:
+                continue
             team = find_existing_translation(t_name, team_translations)
-            if team and not team.get("logo_url") and img:
-                team["logo_url"] = img.strip()
-                if team.get("row_num") and team.get("sheet_name"):
-                    alias_updates.append((team["row_num"], team["sheet_name"], 4, team["logo_url"]))
-
-    logger.success("Translation: Translation completed.")
-    print()
+            if team and team.get("type") != "national":
+                if team.get("logo_url") != img:
+                    team["logo_url"] = img
+                    if team.get("row_num") and team.get("sheet_name"):
+                        alias_updates.append((team["row_num"], team["sheet_name"], 5, img))
 
     # Re-evaluate cached matches & slots with updated translations and purge duplicate IDs
     migrate_matches_cache_translations(matches_cache, team_translations, slots)
+
+    logger.success("Translation: Translation completed.")
+    print()
 
     now_dt = get_now_local()
     parsed_matches, updated_matches_cache = _process_matches(

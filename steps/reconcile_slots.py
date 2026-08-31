@@ -185,15 +185,16 @@ def run(
     restored_slots: list,
     scraped_events: list,
     blog_id: str,
-    blog_player_id: str
+    blog_player_id: str,
+    matches_cache: dict = None
 ) -> tuple[list, list, dict]:
     """
     Step 5: Reconciles slots with active stream events and applies Blogger post/channel updates.
     Returns (all_changed_slots, slot_actions, public_posts_map).
     """
     try:
-        active_stream_events = [e for e in scraped_events if e.get("channels") and e.get("status_class") in ["live", "not-started"]]
-        slot_actions = reconciler.reconcile_state(valid_slots, active_stream_events)
+        active_stream_events = [e for e in scraped_events if e.get("channels") and e.get("status_class") in ["live", "upcoming"]]
+        slot_actions = reconciler.reconcile_state(valid_slots, active_stream_events, matches_cache)
         _append_invalid_actions(slot_actions, newly_invalid_slots, restored_slots)
 
         for act in slot_actions:

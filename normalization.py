@@ -156,6 +156,13 @@ def _load_canonical_synonyms() -> dict[str, str | None]:
 _CANONICAL_SYNONYMS: dict[str, str | None] = _load_canonical_synonyms()
 
 
+def set_canonical_synonyms(synonyms: dict[str, str]):
+    """Updates the in-memory canonical synonyms dictionary from the Google Sheets cache."""
+    global _CANONICAL_SYNONYMS
+    if synonyms:
+        _CANONICAL_SYNONYMS = {k.strip().lower(): v for k, v in synonyms.items() if k and v}
+
+
 # ---------------------------------------------------------------------------
 # Arabic helpers
 # ---------------------------------------------------------------------------

@@ -42,11 +42,11 @@ def _fetch_embedded_widget_soup(soup: BeautifulSoup, source_url: str, proxies: d
 
 
 def _calculate_status(start_iso: str, duration_min: int, ended: bool) -> str:
-    """Returns live, not-started, or finished based on UTC start time and match duration."""
+    """Returns live, upcoming, or finished based on UTC start time and match duration."""
     if ended:
         return "finished"
     if not start_iso:
-        return "not-started"
+        return "upcoming"
 
     try:
         clean_iso = start_iso.replace("Z", "+00:00")
@@ -58,13 +58,13 @@ def _calculate_status(start_iso: str, duration_min: int, ended: bool) -> str:
         end_dt = start_dt + timedelta(minutes=duration_min)
 
         if now_utc < start_dt:
-            return "not-started"
+            return "upcoming"
         if start_dt <= now_utc < end_dt:
             return "live"
         return "finished"
     except Exception as e:
         logger.warning(f"Plugin (footyy/matches): Failed to evaluate match status for time '{start_iso}': {e}")
-        return "not-started"
+        return "upcoming"
 
 
 def _parse_iso_match_time(iso_str: str, default_date: str) -> tuple[str, str]:

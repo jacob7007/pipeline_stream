@@ -4,6 +4,7 @@ from google.auth.transport.requests import AuthorizedSession
 import logger
 
 API_BASE = "https://www.googleapis.com/blogger/v3"
+BLOGGER_API_TIMEOUT = int(os.environ.get("BLOGGER_API_TIMEOUT", 10))
 
 def get_blogger_session() -> AuthorizedSession:
     """
@@ -36,7 +37,7 @@ def get_blogger_session() -> AuthorizedSession:
 def fetch_post(session: AuthorizedSession, blog_id: str, post_id: str) -> dict:
     """Fetches a post's metadata and content."""
     url = f"{API_BASE}/blogs/{blog_id}/posts/{post_id}"
-    resp = session.get(url)
+    resp = session.get(url, timeout=BLOGGER_API_TIMEOUT)
     resp.raise_for_status()
     return resp.json()
 
@@ -53,7 +54,7 @@ def fetch_all_posts(session: AuthorizedSession, blog_id: str, status: str = None
     for s in statuses:
         params = {"status": s, "maxResults": 500}
         try:
-            resp = session.get(url, params=params)
+            resp = session.get(url, params=params, timeout=BLOGGER_API_TIMEOUT)
             resp.raise_for_status()
             data = resp.json()
             if not first_resp:
@@ -83,7 +84,7 @@ def check_blog_status(session: AuthorizedSession, blog_id: str) -> tuple[bool, s
     """
     url = f"{API_BASE}/blogs/{blog_id}"
     try:
-        resp = session.get(url, timeout=15)
+        resp = session.get(url, timeout=BLOGGER_API_TIMEOUT)
         if resp.status_code == 200:
             return True, ""
 
@@ -116,14 +117,14 @@ def update_post(session: AuthorizedSession, blog_id: str, post_id: str, new_cont
     """Updates/patches a post's content."""
     url = f"{API_BASE}/blogs/{blog_id}/posts/{post_id}"
     payload = {"content": new_content}
-    resp = session.patch(url, json=payload)
+    resp = session.patch(url, json=payload, timeout=BLOGGER_API_TIMEOUT)
     resp.raise_for_status()
     return resp.json()
 
 def fetch_page(session: AuthorizedSession, blog_id: str, page_id: str) -> dict:
     """Fetches a page's metadata and content."""
     url = f"{API_BASE}/blogs/{blog_id}/pages/{page_id}"
-    resp = session.get(url)
+    resp = session.get(url, timeout=BLOGGER_API_TIMEOUT)
     resp.raise_for_status()
     return resp.json()
 
@@ -136,7 +137,7 @@ def check_page_status(session: AuthorizedSession, blog_id: str, page_id: str) ->
         return False, "Page ID is missing or empty"
     url = f"{API_BASE}/blogs/{blog_id}/pages/{page_id}"
     try:
-        resp = session.get(url, timeout=15)
+        resp = session.get(url, timeout=BLOGGER_API_TIMEOUT)
         if resp.status_code == 200:
             data = resp.json()
             status = data.get("status")
@@ -163,7 +164,7 @@ def update_page(session: AuthorizedSession, blog_id: str, page_id: str, new_cont
     """Updates/patches a page's content."""
     url = f"{API_BASE}/blogs/{blog_id}/pages/{page_id}"
     payload = {"content": new_content}
-    resp = session.patch(url, json=payload)
+    resp = session.patch(url, json=payload, timeout=BLOGGER_API_TIMEOUT)
     resp.raise_for_status()
     return resp.json()
 
