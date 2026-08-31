@@ -296,14 +296,16 @@ def _fetch_and_parse_urls(urls_to_scrape: list) -> tuple[list, set]:
         if err:
             errors.append(f"{clean_url}: {err}")
 
+        site_matches = []
         for match_data in raw_matches:
             t1 = match_data["team1_name"].strip()
             t2 = match_data["team2_name"].strip()
 
-            # Deduplicate across multiple sources by normalized team names and date
-            if _is_duplicate_raw_match(match_data, matches_to_process):
+            # Deduplicate multiple occurrences within the same website page
+            if _is_duplicate_raw_match(match_data, site_matches):
                 continue
 
+            site_matches.append(match_data)
             unique_team_names.add(t1)
             unique_team_names.add(t2)
             matches_to_process.append(match_data)
@@ -432,19 +434,65 @@ def _build_match_event(match_data: dict, team_translations: dict, matches_cache:
     return event, cache_entry
 
 
+def _merge_channel_lists(channels_a: list, channels_b: list) -> list:
+    """Merges two channel lists, deduplicating by stream endpoint and sorting by priority."""
+    if not channels_a:
+        return channels_b or []
+    if not channels_b:
+        return channels_a or []
+
+    merged = []
+    seen_endpoints = set()
+
+    for ch in (channels_a + channels_b):
+        if not isinstance(ch, dict):
+            continue
+        ctype = ch.get("type", "").strip().lower()
+        if ctype == "shaka":
+            endpoint = ("shaka", ch.get("manifest", "").strip())
+        elif ctype == "hls":
+            endpoint = ("hls", ch.get("url", "").strip())
+        elif ctype == "iframe":
+            raw_u = ch.get("url", "").strip()
+            m_match = re.search(r'[?&](?:m|match)=(\d+)', raw_u)
+            if m_match:
+                endpoint = ("iframe", raw_u.split("?")[0], m_match.group(1))
+            else:
+                endpoint = ("iframe", raw_u)
+        else:
+            endpoint = (ctype, ch.get("url", "").strip())
+
+        if endpoint in seen_endpoints:
+            continue
+        seen_endpoints.add(endpoint)
+        merged.append(dict(ch))
+
+    merged.sort(key=lambda c: (
+        channel_resolver.get_channel_priority(c),
+        int(c.get("id", 999)) if str(c.get("id", "")).isdigit() else 999
+    ))
+
+    for idx, c in enumerate(merged, start=1):
+        c["id"] = idx
+        c["name"] = f"Live {idx}"
+
+    return merged
+
+
 def _process_matches(matches_to_process: list, team_translations: dict, matches_cache: dict, now_dt: datetime, proxies: dict) -> tuple:
     parsed_matches_map = {}
     updated_matches_cache = {}
 
-    active_channel_matches = sum(
-        1 for m in matches_to_process
-        if m.get("match_url") and is_match_starting_soon(
-            parse_match_time(m.get("date_str", ""), m.get("time_str", ""), source_tz=m.get("source_tz")),
-            now_dt,
-            status_class=m.get("status_class", ""),
-            threshold_minutes=60,
-        )
-    )
+    unique_soon_matches = set()
+    for m in matches_to_process:
+        if m.get("match_url"):
+            k_time = parse_match_time(m.get("date_str", ""), m.get("time_str", ""), source_tz=m.get("source_tz"))
+            if is_match_starting_soon(k_time, now_dt, status_class=m.get("status_class", ""), threshold_minutes=60):
+                t1 = m.get("team1_name", "").strip()
+                t2 = m.get("team2_name", "").strip()
+                unique_soon_matches.add((t1, t2, k_time))
+
+    active_channel_matches = len(unique_soon_matches)
 
     if active_channel_matches > 0:
         match_str = f"{active_channel_matches} match live / starting soon" if active_channel_matches == 1 else f"{active_channel_matches} matches live / starting soon"
@@ -473,10 +521,11 @@ def _process_matches(matches_to_process: list, team_translations: dict, matches_
 
             if existing_target_id:
                 existing_ev = parsed_matches_map[existing_target_id]
-                if not existing_ev.get("channels") and event.get("channels"):
-                    existing_ev["channels"] = event["channels"]
+                existing_ev["channels"] = _merge_channel_lists(existing_ev.get("channels", []), event.get("channels", []))
                 if event.get("status_class") == "live" and existing_ev.get("status_class") != "live":
                     existing_ev["status_class"] = "live"
+                if not existing_ev.get("link") and event.get("link"):
+                    existing_ev["link"] = event["link"]
             else:
                 parsed_matches_map[ev_id] = event
 
@@ -488,6 +537,12 @@ def _process_matches(matches_to_process: list, team_translations: dict, matches_
                     if existing_status == "live" and entry.get("status_class") != "live":
                         continue
                 updated_matches_cache[target_key] = entry
+
+            # Keep cache channels payload in sync with merged channels
+            if target_key in updated_matches_cache and target_key in parsed_matches_map:
+                merged_ch = parsed_matches_map[target_key].get("channels", [])
+                if merged_ch:
+                    updated_matches_cache[target_key]["channels"] = patcher.encode_channels_payload(merged_ch)
 
     # Retain matches from previous cache that disappeared from competitor sources but haven't expired
     if matches_cache:
@@ -515,6 +570,15 @@ def _process_matches(matches_to_process: list, team_translations: dict, matches_
                 if is_duplicate:
                     logger.info(f"Cache: Pruned obsolete/duplicate cache entry '{ev_id}' (superseded by active scrape).")
                     continue
+
+                # Prune unbroadcasted matches that disappeared from all competitor scrapers past kickoff with no stream
+                has_stream = bool(cached_entry.get("channels") or cached_entry.get("link"))
+                dt_kickoff = parse_user_styled_time(k_time)
+                if not has_stream and dt_kickoff != datetime.min:
+                    if now_dt >= dt_kickoff + timedelta(minutes=15):
+                        ev_name = cached_entry.get("event_name", ev_id)
+                        logger.info(f"Cache: Pruned unbroadcasted match '{ev_name}' (disappeared from competitor sources past kickoff with no stream).")
+                        continue
 
                 retained_entry = dict(cached_entry)
                 # If match duration has passed or it was marked finished, ensure it stays finished and link is cleared

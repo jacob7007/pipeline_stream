@@ -49,16 +49,18 @@ def item(message: str, indent: int = 2):
     print(f"{spaces}{COLOR_CYAN}➤{COLOR_RESET}  {message}", flush=True)
 
 def action(action_type: str, message: str, indent: int = 2):
-    """Prints a styled reconciliation action line."""
+    """Prints a styled reconciliation action line with equal width and centered text."""
     action_styles = {
-        "no_action":         (COLOR_DARK_GRAY, "[ NO ACTION  ]"),
-        "assign_new":        (COLOR_GREEN,     "[ ASSIGN NEW ]"),
-        "update_sheet_only": (COLOR_YELLOW,    "[ UPD SHEET  ]"),
-        "free_slot":         (COLOR_YELLOW,    "[ FREE SLOT  ]"),
-        "mark_invalid":      (COLOR_RED,       "[ MARK INVALID]"),
-        "restore_slot":      (COLOR_GREEN,     "[ RESTORE SLOT]"),
+        "no_action":         (COLOR_DARK_GRAY, "NO ACTION"),
+        "assign_new":        (COLOR_GREEN,     "ASSIGN NEW"),
+        "update_sheet_only": (COLOR_YELLOW,    "UPD SHEET"),
+        "sync_channels":     (COLOR_CYAN,      "SYNC CHANS"),
+        "free_slot":         (COLOR_YELLOW,    "FREE SLOT"),
+        "mark_invalid":      (COLOR_RED,       "MARK INVALID"),
+        "restore_slot":      (COLOR_GREEN,     "RESTORE SLOT"),
     }
-    color, prefix = action_styles.get(action_type, (COLOR_RESET, f"[{action_type.upper():<14}]"))
+    color, label = action_styles.get(action_type, (COLOR_RESET, action_type.replace("_", " ").upper()))
+    prefix = f"[{label:^14}]"
     spaces = " " * indent
     if action_type == "no_action":
         print(f"{spaces}{color}{prefix} {message}{COLOR_RESET}")

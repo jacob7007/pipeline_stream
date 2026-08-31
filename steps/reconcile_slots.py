@@ -23,6 +23,9 @@ def _patch_single_player_channel(slot: dict, event: dict, post_id: str, blogger_
     ch_text = f"{ch_count} live channel{'s' if ch_count != 1 else ''}"
     try:
         patched_content = patcher.patch_player_payload(current_content, channel_streams)
+        if patched_content == current_content:
+            return post_data.get("url", "")
+
         logger.info(f"Updating stream player for {slot_name} ({ch_text})...")
         blogger_module.update_post(blogger_session, blog_player_id, post_id, patched_content)
         logger.success(f"Successfully updated player for {slot_name}.")
@@ -193,8 +196,11 @@ def run(
     Returns (all_changed_slots, slot_actions, public_posts_map).
     """
     try:
+        player_posts_map = blogger_module.fetch_posts_map(blogger_session, blog_player_id, status="live,draft")
+        public_posts_map = blogger_module.fetch_posts_map(blogger_session, blog_id, status="live,draft")
+
         active_stream_events = [e for e in scraped_events if e.get("channels") and e.get("status_class") in ["live", "upcoming"]]
-        slot_actions = reconciler.reconcile_state(valid_slots, active_stream_events, matches_cache)
+        slot_actions = reconciler.reconcile_state(valid_slots, active_stream_events, matches_cache, player_posts_map)
         _append_invalid_actions(slot_actions, newly_invalid_slots, restored_slots)
 
         for act in slot_actions:
@@ -202,9 +208,6 @@ def run(
 
         if slot_actions:
             print()
-
-        player_posts_map = blogger_module.fetch_posts_map(blogger_session, blog_player_id, status="live,draft")
-        public_posts_map = blogger_module.fetch_posts_map(blogger_session, blog_id, status="live,draft")
 
         changed_slots, player_updates_count, public_updates_count = execute_slot_updates(
             slot_actions, blogger_session, player_posts_map, public_posts_map, blog_id, blog_player_id

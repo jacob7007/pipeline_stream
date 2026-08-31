@@ -1,6 +1,6 @@
 import os
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 import gspread
 from google.oauth2.service_account import Credentials
 import logger
@@ -256,7 +256,7 @@ def fetch_matches_cache(client, spreadsheet_name: str = "Streaming Dashboard") -
 
 
 def _filter_valid_cache_rows(matches_cache: dict, now: datetime, now_local_str: str) -> list:
-    """Filters out matches expired 3 hours after scheduled end and formats 13-column rows for cache sheet."""
+    """Filters out matches expired 3 hours after scheduled end or unbroadcasted ghost matches past kickoff."""
     valid_cache_rows = []
     for event_id, data in matches_cache.items():
         k_time = data.get("kickoff_time", "")
@@ -264,6 +264,12 @@ def _filter_valid_cache_rows(matches_cache: dict, now: datetime, now_local_str: 
 
         # Check if match has passed its 3-hour post-game retention window
         if is_match_expired(k_time, duration, now, grace_minutes=180):
+            continue
+
+        # Prune unbroadcasted ghost matches that have no stream past kickoff + 15 min
+        has_stream = bool(data.get("channels") or data.get("link"))
+        dt_k = parse_user_styled_time(k_time)
+        if not has_stream and dt_k != datetime.min and now >= dt_k + timedelta(minutes=15) and data.get("status_class") != "finished":
             continue
 
         last_updated_str = data.get("last_updated", "")
@@ -312,11 +318,19 @@ def save_matches_cache(client, matches_cache: dict, spreadsheet_name: str = "Str
     now = get_now_local()
     now_local_str = format_to_human_time(now.replace(tzinfo=resolve_timezone(None)).isoformat())
 
-    # Purge expired matches in-place from the matches_cache dictionary
-    expired_ids = [
-        ev_id for ev_id, data in matches_cache.items()
-        if is_match_expired(data.get("kickoff_time", ""), int(data.get("duration", 180)), now, grace_minutes=180)
-    ]
+    # Purge expired and ghost matches in-place from the matches_cache dictionary
+    expired_ids = []
+    for ev_id, data in matches_cache.items():
+        k_time = data.get("kickoff_time", "")
+        duration = int(data.get("duration", 180))
+        if is_match_expired(k_time, duration, now, grace_minutes=180):
+            expired_ids.append(ev_id)
+            continue
+        has_stream = bool(data.get("channels") or data.get("link"))
+        dt_k = parse_user_styled_time(k_time)
+        if not has_stream and dt_k != datetime.min and now >= dt_k + timedelta(minutes=15) and data.get("status_class") != "finished":
+            expired_ids.append(ev_id)
+
     for ev_id in expired_ids:
         del matches_cache[ev_id]
 

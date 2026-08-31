@@ -1,3 +1,4 @@
+import re
 import patcher
 from utils import get_slot_label, get_event_display_name, format_to_human_time
 
@@ -75,7 +76,13 @@ def _free_unmatched_slots(to_be_freed: list, reassigned_slots: set, actions: lis
             })
 
 
-def _evaluate_matched_slots(active_matched: list, scraped_map: dict, actions: list, matches_cache: dict = None):
+def _evaluate_matched_slots(
+    active_matched: list,
+    scraped_map: dict,
+    actions: list,
+    matches_cache: dict = None,
+    player_posts_map: dict = None
+):
     """Checks if matched active slots require stream channel updates or metadata sync."""
     for slot in active_matched:
         ev_id = slot["event_id"]
@@ -84,8 +91,21 @@ def _evaluate_matched_slots(active_matched: list, scraped_map: dict, actions: li
         slot_label = get_slot_label(slot)
 
         current_payload = patcher.encode_channels_payload(event.get("channels", []))
-        cached_payload = matches_cache.get(ev_id, {}).get("channels", "") if matches_cache else ""
-        channels_changed = (current_payload != cached_payload) if cached_payload else True
+
+        # Check payload currently published in the Blogger player post if available
+        channel_post_id = slot.get("channel_post_id", "").strip()
+        published_payload = None
+        if player_posts_map and channel_post_id in player_posts_map:
+            post_content = player_posts_map[channel_post_id].get("content", "")
+            m = re.search(r'const\s+_payload\s*=\s*\"([^\"]*)\"', post_content)
+            if m:
+                published_payload = m.group(1)
+
+        if published_payload is not None:
+            channels_changed = (current_payload != published_payload)
+        else:
+            cached_payload = matches_cache.get(ev_id, {}).get("channels", "") if matches_cache else ""
+            channels_changed = (current_payload != cached_payload) if cached_payload else True
 
         if channels_changed:
             actions.append({
@@ -108,7 +128,12 @@ def _evaluate_matched_slots(active_matched: list, scraped_map: dict, actions: li
                 })
 
 
-def reconcile_state(sheet_slots: list, scraped_events: list, matches_cache: dict = None) -> list:
+def reconcile_state(
+    sheet_slots: list,
+    scraped_events: list,
+    matches_cache: dict = None,
+    player_posts_map: dict = None
+) -> list:
     """
     Compares the Google Sheet slot states with the scraped live events.
     Limits candidate events to the available slot capacity, excluding finished matches.
@@ -135,7 +160,7 @@ def reconcile_state(sheet_slots: list, scraped_events: list, matches_cache: dict
 
     _assign_unassigned_events(unassigned_events, free_slots_queue, to_be_freed, actions, reassigned_slots)
     _free_unmatched_slots(to_be_freed, reassigned_slots, actions)
-    _evaluate_matched_slots(active_matched, scraped_map, actions, matches_cache)
+    _evaluate_matched_slots(active_matched, scraped_map, actions, matches_cache, player_posts_map)
 
     return actions
 

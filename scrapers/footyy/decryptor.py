@@ -107,12 +107,26 @@ def resolve_blogma_stream(url: str, proxies: dict = None) -> dict | None:
     """
     Decrypts a Blogma helper page (sewzzy, swxzyy, nazity, kkzawe, etc.) to extract
     the native Shaka DASH manifest and ClearKey pairs, bypassing browser anti-embed checks.
+    Supports both direct plaintext DASH definitions and two-layer CryptoJS AES __payload ciphertext.
     Returns a stream dict with type 'shaka' or 'hls', or None if decryption fails.
     """
     headers = {**DEFAULT_HEADERS, "Referer": "https://m.blogma.sbs/"}
     try:
         resp = requests.get(url, headers=headers, timeout=10, proxies=proxies)
-        if resp.status_code != 200 or "__payload" not in resp.text:
+        if resp.status_code != 200:
+            return None
+
+        parsed_url = urlparse(url)
+        qs = parse_qs(parsed_url.query)
+        target_id = qs.get("id", [None])[0] or qs.get("src", [None])[0]
+
+        # Case 1: Direct plaintext DASH stream or manifest embedded in the page
+        direct_stream = _extract_stream_from_decrypted(resp.text, target_id)
+        if direct_stream and (direct_stream.get("manifest") or direct_stream.get("url")):
+            return direct_stream
+
+        # Case 2: AES encrypted __payload
+        if "__payload" not in resp.text:
             return None
 
         m_payload = re.search(r'var\s+__payload\s*=\s*\"([^\"]+)\"', resp.text)
@@ -136,10 +150,6 @@ def resolve_blogma_stream(url: str, proxies: dict = None) -> dict | None:
 
         decB = _cryptojs_aes_decrypt(payload, kB)
         decA = _cryptojs_aes_decrypt(decB, kA)
-
-        parsed_url = urlparse(url)
-        qs = parse_qs(parsed_url.query)
-        target_id = qs.get("id", [None])[0] or qs.get("src", [None])[0]
 
         return _extract_stream_from_decrypted(decA, target_id)
 
