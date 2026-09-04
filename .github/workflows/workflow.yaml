@@ -55,6 +55,7 @@ jobs:
         DATA_PAGE_ID: ${{ secrets.DATA_PAGE_ID }}
         SPREADSHEET_NAME: ${{ secrets.SPREADSHEET_NAME }}
         DEFAULT_TIMEZONE: ${{ secrets.DEFAULT_TIMEZONE }}
+        PLAYER_THEME: ${{ secrets.PLAYER_THEME }}
         SCRAPER_URLS: ${{ secrets.SCRAPER_URLS }}
       run: |
         python run_pipeline.py

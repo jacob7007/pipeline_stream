@@ -442,6 +442,37 @@ def get_data_page_id() -> str:
     """Returns the Blogger page ID for matches data from DATA_PAGE_ID env var."""
     return os.environ.get("DATA_PAGE_ID", "").strip()
 
+DEFAULT_PLAYER_THEME = "?background=ffffff&theme=light&primary=1a73e8"
+
+def get_player_theme() -> str:
+    """Returns the player theme query string from PLAYER_THEME env var, or DEFAULT_PLAYER_THEME if unset/empty."""
+    theme = os.environ.get("PLAYER_THEME", "").strip()
+    return theme if theme else DEFAULT_PLAYER_THEME
+
+def build_player_iframe_url(player_url: str) -> str:
+    """Appends the player theme query parameters to the player post URL before embedding it in the public blog.
+    Ensures theme queries are always included (defaulting to DEFAULT_PLAYER_THEME).
+    """
+    if not player_url or not player_url.strip():
+        return ""
+    player_url = player_url.strip()
+    theme = get_player_theme().strip()
+    if not theme:
+        theme = DEFAULT_PLAYER_THEME
+
+    query = theme.lstrip("?").lstrip("&")
+    if not query:
+        return player_url
+
+    # Avoid duplicating if already present
+    if query in player_url:
+        return player_url
+
+    if player_url.endswith("?") or player_url.endswith("&"):
+        return f"{player_url}{query}"
+    sep = "&" if "?" in player_url else "?"
+    return f"{player_url}{sep}{query}"
+
 def get_spreadsheet_name() -> str:
     """Returns the Google Sheets spreadsheet name/ID from SPREADSHEET_NAME env var."""
     return os.environ.get("SPREADSHEET_NAME", "Streaming Dashboard").strip()

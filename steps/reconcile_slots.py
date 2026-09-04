@@ -2,7 +2,7 @@ import reconciler
 import blogger_module
 import patcher
 import logger
-from utils import get_slot_label, get_event_display_name, format_to_human_time, PipelineAbortError
+from utils import get_slot_label, get_event_display_name, format_to_human_time, PipelineAbortError, build_player_iframe_url
 
 
 def _patch_single_player_channel(slot: dict, event: dict, post_id: str, blogger_session, posts_map: dict, blog_player_id: str) -> str:
@@ -39,6 +39,7 @@ def _patch_single_player_channel(slot: dict, event: dict, post_id: str, blogger_
 
 def _patch_single_blog_post(slot: dict, iframe_src: str, post_id: str, blogger_session, posts_map: dict, blog_id: str) -> bool:
     """Fetches, patches the iframe, and updates a Public Blog post on Blogger."""
+    iframe_src = build_player_iframe_url(iframe_src)
     slot_name = get_slot_label(slot)
     post_data = posts_map.get(post_id)
     if not post_data:
@@ -148,7 +149,8 @@ def execute_slot_updates(actions: list, blogger_session, player_posts_map: dict,
 
             target_iframe = player_url or player_posts_map.get(channel_post_id, {}).get("url", "")
             if blog_post_id and target_iframe:
-                if _patch_single_blog_post(slot, target_iframe, blog_post_id, blogger_session, public_posts_map, blog_id):
+                themed_iframe = build_player_iframe_url(target_iframe)
+                if _patch_single_blog_post(slot, themed_iframe, blog_post_id, blogger_session, public_posts_map, blog_id):
                     public_updates_count += 1
 
     return changed_slots, player_updates_count, public_updates_count
