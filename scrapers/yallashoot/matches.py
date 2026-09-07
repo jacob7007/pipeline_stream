@@ -1,38 +1,16 @@
 import re
 from urllib.parse import urljoin
 from bs4 import BeautifulSoup
-import requests
-import logger
-from utils import DEFAULT_HEADERS
-
-# ---------------------------------------------------------------------------
-# Plugin: Yalla-Shoot Family
-# Handles structural variants across the Yalla-Shoot ecosystem:
-#
-# Variant 1 — Classic AY_Match engine (Yalla-Shoot clones, LiveHD7, Kora-Star, Sir-TV)
-#   Container : .AY_Match
-#   Team 1    : .TM1 .TM_Name  /  Logo: .TM1 .TM_Logo img
-#   Team 2    : .TM2 .TM_Name  /  Logo: .TM2 .TM_Logo img
-#   Time      : .MT_Time or data-start
-#
-# Variant 2 — Modern match-container engine (Arabic sports portals, Blogger themes)
-#   Container : .match-container
-#   Team 1    : .right-team .team-name  /  Logo: .right-team .team-logo img
-#   Team 2    : .left-team  .team-name  /  Logo: .left-team  .team-logo img
-#   Time      : .match-time
-# ---------------------------------------------------------------------------
+from scrapers.exceptions import ScraperPluginError
 
 # Status class names shared across both variants
 _LIVE_CLASSES     = {"live", "live2", "started", "gools", "playing", "first-half", "second-half"}
 _FINISHED_CLASSES = {"end", "finished", "ended", "ft", "match-ended"}
 _UPCOMING_CLASSES = {"comming-soon", "commingsoon", "comingsoon", "coming-soon", "not-started", "not-start", "comming", "coming", "soon", "ns"}
 
-# Domains that are never streaming iframes — always filter them out for Yalla-Shoot family
-_NON_STREAMING_DOMAINS = ["blogger.com", "google", "facebook", "twitter", "youtube", "cloudflare"]
 
-
-# Uses compound structural fingerprints to recognize classic AY_Match or modern match-container markup
 def can_handle(soup: BeautifulSoup) -> bool:
+    """Uses compound structural fingerprints to recognize classic AY_Match or modern match-container markup."""
     variant_1 = bool(soup.select(".AY_Match, .AY_Inner, .TM_Name"))
     variant_2 = bool(soup.select(".match-container .right-team, .match-container .team-name"))
     return variant_1 or variant_2
@@ -171,8 +149,12 @@ def _extract_match_date(match, link_elem, default_date: str) -> str:
 
 
 def parse_matches(soup: BeautifulSoup, source_url: str, default_date: str, source_tz: str | int = None) -> list:
+    """Parses match elements from any YallaShoot-family schedule page."""
     match_elements = soup.select(".AY_Match, .match-container")
     real_matches = [m for m in match_elements if not m.select_one(".no-data__msg")]
+
+    if not real_matches and can_handle(soup):
+        raise ScraperPluginError("YallaShoot match containers found but 0 valid match rows extracted")
 
     results = []
     for match in real_matches:
@@ -211,75 +193,3 @@ def parse_matches(soup: BeautifulSoup, source_url: str, default_date: str, sourc
         })
 
     return results
-
-
-def extract_iframe(match_url: str, proxies: dict = None, context: dict = None) -> str:
-    try:
-        resp = requests.get(match_url, headers=DEFAULT_HEADERS, timeout=12, proxies=proxies)
-        if resp.status_code != 200:
-            return ""
-
-        text = resp.text
-
-        # 1. Check for modern DMCA redirect scripts (e.g. hes-goals.mov, tvsir, sirtv)
-        if "location.replace" in text and ("PLAYER_HOST" in text or "URLSearchParams" in text):
-            m_match = re.search(r'[?&](?:m|match)=(\d+)', match_url)
-            match_id = m_match.group(1) if m_match else ""
-            if not match_id:
-                m_path = re.search(r'/(\d{4,9})\b', match_url)
-                if m_path:
-                    match_id = m_path.group(1)
-
-            if match_id:
-                m_host = re.search(r'PLAYER_HOST\s*=\s*[\'\"]([^\'\"]+)[\'\"]', text)
-                host = m_host.group(1) if m_host else "yassirtv.com"
-                m_pid = re.search(r'[?&]p=(\d+)', match_url)
-                pid = m_pid.group(1) if m_pid else "87350"
-
-                target_url = f"https://{host}/hard/2908c7d4425d{pid}.html?match={match_id}"
-                r_target = requests.get(target_url, headers={**DEFAULT_HEADERS, "Referer": match_url}, timeout=10, proxies=proxies)
-                if r_target.status_code == 200:
-                    # Look for __playerSrc or playerv5.php endpoint
-                    m_key = re.search(r'&key=([a-fA-F0-9]+)', r_target.text)
-                    key = m_key.group(1) if m_key else "9f39972b67d6ce22189507d008acwc26"
-                    m_base = re.search(r'[\'\"](https://[a-zA-Z0-9.-]+\.yasirtv\.com/playerv5\.php\?match=)[\'\"]', r_target.text)
-                    if m_base:
-                        return f"{m_base.group(1)}{match_id}&key={key}"
-                    m_full = re.search(r'[\'\"](https?://[^\'\"]+/playerv5\.php\?match=\d+&key=[a-fA-F0-9]+)[\'\"]', r_target.text)
-                    if m_full:
-                        return m_full.group(1)
-
-        # 2. Check for explicit __playerSrc or player.src in page
-        m_psrc = re.search(r'__playerSrc\s*=\s*[\'\"]([^\'\"]+)[\'\"]', text)
-        if m_psrc and m_psrc.group(1).startswith(("http://", "https://")):
-            return m_psrc.group(1)
-
-        # 3. Static iframe inspection
-        soup = BeautifulSoup(text, "html.parser")
-        for iframe in soup.find_all("iframe"):
-            src = iframe.get("src") or iframe.get("data-src")
-            if not src:
-                continue
-            if any(domain in src for domain in _NON_STREAMING_DOMAINS):
-                continue
-            return src
-    except Exception as e:
-        logger.warning(f"Plugin (from_yallashoot): Failed to extract iframe from {match_url}: {e}")
-    return ""
-
-
-def extract_channels(match_url: str, proxies: dict = None) -> list[dict]:
-    """Extracts the single stream channel from a Yalla-Shoot match page as a standardised channel list."""
-    iframe_url = extract_iframe(match_url, proxies=proxies)
-    if not iframe_url:
-        return []
-    return [{
-        "id": 1,
-        "name": "Live 1",
-        "quality": "iFrame",
-        "type": "iframe",
-        "url": iframe_url,
-        "sandbox": "allow-scripts allow-same-origin allow-presentation allow-forms",
-    }]
-
-

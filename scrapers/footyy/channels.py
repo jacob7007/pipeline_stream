@@ -228,7 +228,7 @@ def _format_channel_entry(entry: dict, idx: int, proxies: dict = None) -> dict |
     if _is_blogma_helper(c_type, full_url) and full_url.startswith(("http://", "https://")):
         drm_stream = resolve_blogma_stream(full_url, proxies=proxies)
         if drm_stream:
-            quality_label = "DRM" if drm_stream.get("type") == "shaka" else "HLS"
+            quality_label = "DASH" if drm_stream.get("type") == "dash" else "HLS"
             return {"id": c_id, "name": c_name, "quality": quality_label, **drm_stream}
         # If decryption failed on a blogspot helper proxy, do not treat dead proxy as valid iframe
         if "blogspot.com" in full_url:

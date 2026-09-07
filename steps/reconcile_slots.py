@@ -2,7 +2,14 @@ import reconciler
 import blogger_module
 import patcher
 import logger
-from utils import get_slot_label, get_event_display_name, format_to_human_time, PipelineAbortError, build_player_iframe_url
+from utils import (
+    get_slot_label,
+    get_event_display_name,
+    format_to_human_time,
+    PipelineAbortError,
+    build_player_iframe_url,
+    get_now_local,
+)
 
 
 def _patch_single_player_channel(slot: dict, event: dict, post_id: str, blogger_session, posts_map: dict, blog_player_id: str) -> str:
@@ -201,8 +208,9 @@ def run(
         player_posts_map = blogger_module.fetch_posts_map(blogger_session, blog_player_id, status="live,draft")
         public_posts_map = blogger_module.fetch_posts_map(blogger_session, blog_id, status="live,draft")
 
+        now_dt = get_now_local()
         active_stream_events = [e for e in scraped_events if e.get("channels") and e.get("status_class") in ["live", "upcoming"]]
-        slot_actions = reconciler.reconcile_state(valid_slots, active_stream_events, matches_cache, player_posts_map)
+        slot_actions = reconciler.reconcile_state(valid_slots, active_stream_events, matches_cache, player_posts_map, now_dt=now_dt)
         _append_invalid_actions(slot_actions, newly_invalid_slots, restored_slots)
 
         for act in slot_actions:

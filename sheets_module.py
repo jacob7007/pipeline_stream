@@ -37,7 +37,8 @@ MATCHES_CACHE_COLUMNS = [
     "status_class",
     "last_updated",
     "team1_img",
-    "team2_img"
+    "team2_img",
+    "sources"
 ]
 
 
@@ -181,7 +182,7 @@ def fetch_matches_cache(client, spreadsheet_name: str = "Streaming Dashboard") -
     try:
         worksheet = sh.worksheet(sheet_name)
     except gspread.exceptions.WorksheetNotFound:
-        worksheet = sh.add_worksheet(title=sheet_name, rows="1000", cols="13")
+        worksheet = sh.add_worksheet(title=sheet_name, rows="1000", cols="14")
         worksheet.append_row(MATCHES_CACHE_COLUMNS)
         return {}
 
@@ -236,6 +237,12 @@ def fetch_matches_cache(client, spreadsheet_name: str = "Streaming Dashboard") -
             t2_display = team2_en or team2_ar
             ev_name = f"{t1_display} vs {t2_display}" if (t1_display and t2_display) else event_id
 
+        sources = []
+        if "sources" in header_map:
+            raw_sources = padded_row[header_map["sources"]].strip()
+            if raw_sources:
+                sources = [s.strip() for s in raw_sources.split(",") if s.strip()]
+
         matches_cache[event_id] = {
             "event_id": event_id,
             "event_name": ev_name,
@@ -251,6 +258,8 @@ def fetch_matches_cache(client, spreadsheet_name: str = "Streaming Dashboard") -
             "duration": duration,
             "status_class": s_class,
             "last_updated": l_updated,
+            "sources": sources,
+            "plugin": sources[0] if sources else "",
         }
     return matches_cache
 
@@ -286,6 +295,11 @@ def _filter_valid_cache_rows(matches_cache: dict, now: datetime, now_local_str: 
         if status_class not in ["live", "upcoming", "finished"]:
             status_class = "upcoming"
 
+        sources_list = data.get("sources", [])
+        if not sources_list and data.get("plugin"):
+            sources_list = [data["plugin"]]
+        sources_str = ", ".join(sources_list)
+
         row = [
             data.get("event_id", event_id),
             data.get("team1_en", ""),
@@ -299,7 +313,8 @@ def _filter_valid_cache_rows(matches_cache: dict, now: datetime, now_local_str: 
             status_class,
             out_time_str,
             data.get("team1_img", ""),
-            data.get("team2_img", "")
+            data.get("team2_img", ""),
+            sources_str
         ]
         valid_cache_rows.append(row)
 
@@ -313,7 +328,7 @@ def save_matches_cache(client, matches_cache: dict, spreadsheet_name: str = "Str
     try:
         worksheet = sh.worksheet(sheet_name)
     except gspread.exceptions.WorksheetNotFound:
-        worksheet = sh.add_worksheet(title=sheet_name, rows="1000", cols="13")
+        worksheet = sh.add_worksheet(title=sheet_name, rows="1000", cols="14")
 
     now = get_now_local()
     now_local_str = format_to_human_time(now.replace(tzinfo=resolve_timezone(None)).isoformat())
@@ -372,16 +387,9 @@ def save_matches_cache(client, matches_cache: dict, spreadsheet_name: str = "Str
     return True
 
 
-DOMAIN_CACHE_COLUMNS = ["domain", "status", "failure_reason", "last_tested"]
+DOMAIN_CACHE_COLUMNS = ["domain", "status"]
 
 _DOMAIN_CACHE_SHEET = "_cache_domains"
-
-_PRE_SEEDED_DOMAINS = {
-    "youtube.com": {"status": "OK", "failure_reason": "--", "last_tested": "pre-seeded"},
-    "youtu.be":    {"status": "OK", "failure_reason": "--", "last_tested": "pre-seeded"},
-    "ok.ru":       {"status": "OK", "failure_reason": "--", "last_tested": "pre-seeded"},
-    "yasirtv.com": {"status": "OK", "failure_reason": "--", "last_tested": "pre-seeded"},
-}
 
 
 def domain_to_sheet_format(domain: str) -> str:
@@ -394,85 +402,90 @@ def domain_from_sheet_format(raw_domain: str) -> str:
     return raw_domain.strip().lower().replace("_", ".")
 
 
-def load_domain_cache(client: gspread.Client, spreadsheet_name: str = "Streaming Dashboard") -> dict:
-    """Loads the domain validation cache from the '_cache_domains' worksheet.
+def load_domain_cache(client: gspread.Client, spreadsheet_name: str = "Streaming Dashboard") -> tuple[dict, list[tuple[str, str]], list[str]]:
+    """Loads domain validation cache, dynamic P1 rules, and dynamic sandbox error phrases
+    from the '_cache_domains' worksheet in a single Google Sheets API call.
 
-    Returns a dict keyed by registered domain:
-        {
-            "embed1.top":      {"status": "OK",  "failure_reason": "--",               "last_tested": "30 Aug - 16:00"},
-            "merithotdog.net": {"status": "NO",  "failure_reason": "SANDBOX_REJECTED", "last_tested": "..."},
-            "somesite.com":    {"status": "--",  "failure_reason": "TIMEOUT",          "last_tested": "..."},
-        }
-    If duplicate rows exist for the same domain, the last row wins.
-    If the sheet is empty or newly created, it auto-seeds known-good domains.
+    Returns:
+        (domain_cache, p1_rules, sandbox_errors)
+        - domain_cache: {domain: {"status": "OK"|"NO"|"--"}}
+        - p1_rules: [(domain, quality_label), ...] preserving exact order in sheets
+        - sandbox_errors: [error_phrase_1, error_phrase_2, ...] (100% dynamic from sheet)
     """
     sh = open_spreadsheet(client, spreadsheet_name)
     try:
         worksheet = sh.worksheet(_DOMAIN_CACHE_SHEET)
     except gspread.exceptions.WorksheetNotFound:
-        worksheet = sh.add_worksheet(title=_DOMAIN_CACHE_SHEET, rows="500", cols="4")
-        worksheet.append_row(DOMAIN_CACHE_COLUMNS)
+        worksheet = sh.add_worksheet(title=_DOMAIN_CACHE_SHEET, rows="500", cols="7")
+        worksheet.append_row(["domain", "status", "", "p1_domain", "p1_quality", "", "sandbox_errors"])
         logger.info(f"Sheets: Created '{_DOMAIN_CACHE_SHEET}' worksheet with headers.")
 
     all_values = worksheet.get_all_values()
     if not all_values or len(all_values) <= 1:
-        rows = [
-            [domain_to_sheet_format(d), data["status"], data["failure_reason"], data["last_tested"]]
-            for d, data in sorted(_PRE_SEEDED_DOMAINS.items())
-        ]
-        try:
-            worksheet.clear()
-            worksheet.update([DOMAIN_CACHE_COLUMNS] + rows)
-            logger.info(f"Sheets: Auto-seeded '{_DOMAIN_CACHE_SHEET}' with {len(rows)} trusted domains.")
-        except Exception as ex:
-            logger.warning(f"Sheets: Failed to auto-seed '{_DOMAIN_CACHE_SHEET}': {ex}")
-        return dict(_PRE_SEEDED_DOMAINS)
+        return {}, [], []
 
     headers = [h.strip().lower() for h in all_values[0]]
     header_map = {h: idx for idx, h in enumerate(headers)}
 
-    cache = {}
+    dom_idx = header_map.get("domain", 0)
+    stat_idx = header_map.get("status", 1)
+    p1_dom_idx = header_map.get("p1_domain")
+    p1_qual_idx = header_map.get("p1_quality")
+    err_idx = header_map.get("sandbox_errors")
+
+    domain_cache = {}
+    p1_rules = []
+    sandbox_errors = []
+
     for row in all_values[1:]:
         padded = row + [""] * (len(headers) - len(row))
-        raw_domain = padded[header_map.get("domain", 0)].strip().lower()
-        if not raw_domain:
-            continue
-        domain = domain_from_sheet_format(raw_domain)
-        cache[domain] = {
-            "status":         padded[header_map.get("status", 1)].strip(),
-            "failure_reason": padded[header_map.get("failure_reason", 2)].strip() or "--",
-            "last_tested":    padded[header_map.get("last_tested", 3)].strip(),
-        }
 
-    logger.success(f"Sheets: Loaded {len(cache)} domain cache entries from '{_DOMAIN_CACHE_SHEET}'.")
-    return cache
+        # 1. Domain cache status (Columns A & B)
+        raw_domain = padded[dom_idx].strip().lower() if dom_idx < len(padded) else ""
+        if raw_domain:
+            domain = domain_from_sheet_format(raw_domain)
+            status_val = padded[stat_idx].strip() if stat_idx is not None and stat_idx < len(padded) else "--"
+            domain_cache[domain] = {
+                "status": status_val or "--",
+            }
+
+        # 2. Dynamic P1 rules (Columns D & E: p1_domain, p1_quality)
+        if p1_dom_idx is not None and p1_dom_idx < len(padded):
+            raw_p1 = padded[p1_dom_idx].strip().lower()
+            if raw_p1:
+                p1_domain = domain_from_sheet_format(raw_p1)
+                p1_quality = padded[p1_qual_idx].strip() if p1_qual_idx is not None and p1_qual_idx < len(padded) else ""
+                p1_rules.append((p1_domain, p1_quality))
+
+        # 3. Dynamic sandbox error phrases (Column: sandbox_errors)
+        if err_idx is not None and err_idx < len(padded):
+            raw_err = padded[err_idx].strip()
+            if raw_err:
+                sandbox_errors.append(raw_err)
+
+    logger.success(f"Sheets: Loaded {len(domain_cache)} domains, {len(p1_rules)} high priority domains, and {len(sandbox_errors)} sandbox errors.")
+    return domain_cache, p1_rules, sandbox_errors
 
 
 def save_domain_cache(client: gspread.Client, cache: dict, spreadsheet_name: str = "Streaming Dashboard") -> None:
-    """Rewrites the '_cache_domains' worksheet with one row per domain, sorted alphabetically.
-
-    Domains are saved replacing '.' with '_' (e.g. 'youtube_com', 'evemeverbee_info_pl') so that
-    Google Sheets does not detect them as clickable links or flag them as suspicious.
-    Eliminates any duplicate rows that may have accumulated from manual editing.
-    Only called when the in-memory cache has been modified during the current pipeline run.
+    """Updates only the domain status columns (A and B) in '_cache_domains'.
+    Strictly preserves all other columns (p1_domain, p1_quality, sandbox_errors).
     """
     sh = open_spreadsheet(client, spreadsheet_name)
     try:
         worksheet = sh.worksheet(_DOMAIN_CACHE_SHEET)
     except gspread.exceptions.WorksheetNotFound:
-        worksheet = sh.add_worksheet(title=_DOMAIN_CACHE_SHEET, rows="500", cols="4")
+        worksheet = sh.add_worksheet(title=_DOMAIN_CACHE_SHEET, rows="500", cols="7")
+        worksheet.append_row(["domain", "status", "", "p1_domain", "p1_quality", "", "sandbox_errors"])
 
     rows = []
     for domain in sorted(cache.keys()):
         entry = cache[domain]
         sheet_domain = domain_to_sheet_format(domain)
-        rows.append([
-            sheet_domain,
-            entry.get("status", "--"),
-            entry.get("failure_reason", "--"),
-            entry.get("last_tested", "--"),
-        ])
+        status_val = entry.get("status", "--") if isinstance(entry, dict) else str(entry)
+        rows.append([sheet_domain, status_val])
 
-    worksheet.clear()
-    worksheet.update([DOMAIN_CACHE_COLUMNS] + rows)
+    if rows:
+        range_label = f"A2:B{len(rows) + 1}"
+        worksheet.update(range_label, rows)
     logger.success(f"Sheets: Saved {len(rows)} domain entries to '{_DOMAIN_CACHE_SHEET}'.")

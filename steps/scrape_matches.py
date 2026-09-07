@@ -32,8 +32,10 @@ def _display_scraped_events(scraped_events: list):
             stream_part = f"{logger.COLOR_DARK_GRAY}(No stream){logger.COLOR_RESET}"
 
         aligned_teams = f"{t1:<{max_t1_len}} - {t2:<{max_t2_len}}"
-        if status == "LIVE":
+        if status == "LIVE" and ch_count:
             status_styled = f"{logger.COLOR_GREEN}{logger.COLOR_BOLD}{status:<{max_status_len}}{logger.COLOR_RESET}"
+        elif status == "LIVE" and not ch_count:
+            status_styled = f"{logger.COLOR_YELLOW}SOON    {logger.COLOR_RESET}"
         elif status == "UPCOMING":
             status_styled = f"{logger.COLOR_YELLOW}{status:<{max_status_len}}{logger.COLOR_RESET}"
         elif status == "FINISHED":
@@ -103,7 +105,15 @@ def run(
         logger.item("Scraper: 0 matches currently scheduled on competitor websites.")
         return [], team_translations, updated_matches_cache or matches_cache
 
-    scraped_events.sort(key=lambda ev: (-get_status_priority(ev.get("status_class", "upcoming")), ev["time"]))
+    scraped_events.sort(
+        key=lambda ev: (
+            -get_status_priority(
+                ev.get("status_class", "upcoming"),
+                has_stream=bool(ev.get("channels") or ev.get("link"))
+            ),
+            ev["time"]
+        )
+    )
     lookahead_h = get_match_lookahead_hours()
     hours_str = f"{int(lookahead_h)}h" if lookahead_h.is_integer() else f"{lookahead_h}h"
     print()

@@ -6,61 +6,21 @@ import logger
 from utils import DEFAULT_HEADERS
 
 # ---------------------------------------------------------------------------
-# Configurable sandbox rejection and fatal error phrases — checked case-insensitively.
+# Dynamic sandbox rejection and error phrases — loaded 100% from Google Sheets.
+# Zero hardcoded error phrases.
 # ---------------------------------------------------------------------------
-_SANDBOX_ERROR_PHRASES = [
-    # Anti-sandbox & Anti-embed Rejections
-    "sandbox not allowed",
-    "not allowed",
-    "embed not allowed",
-    "domain not allowed",
-    "domain is not allowed",
-    "unauthorized domain",
-    "domain protected",
-    "anti-embed",
-    "invalid referer",
-    "this content cannot be displayed in a frame",
-    "cannot be displayed in a frame",
-    "access denied",
+_DYNAMIC_SANDBOX_ERRORS: list[str] = []
 
-    # HTTP / Server Status Error Text in Rendered DOM
-    "403 forbidden",
-    "403 forbidden nginx",
-    "404 not found",
-    "page not found",
-    "the resource requested could not be found",
-    "account suspended",
-    "domain suspended",
 
-    # Player Crash & Manifest Failures
-    "could not play video",
-    "there was a problem trying to load the video",
-    "manifestloaderror",
-    "networkerror_manifestloaderror",
-    "cannot load m3u8",
-    "error loading player",
-    "error loading stream",
-    "the media could not be loaded",
-    "stream is offline",
-    "stream offline",
-    "channel offline",
-    "video has been blocked",
-    "video disabled",
-    "video is unavailable",
-    "this video is unavailable",
+def set_sandbox_errors(errors: list[str]) -> None:
+    """Updates the dynamic sandbox error phrases loaded from Google Sheets."""
+    global _DYNAMIC_SANDBOX_ERRORS
+    _DYNAMIC_SANDBOX_ERRORS = [phrase.strip().lower() for phrase in errors if phrase and phrase.strip()]
 
-    # Arabic Error Phrases
-    "غير مسموح",          # not allowed
-    "البث محمي",          # stream protected
-    "تم حظر",             # has been blocked
-    "نطاق غير مصرح",       # unauthorized domain
-    "غير مصرح به",        # unauthorized
-    "البث متوقف",          # stream stopped / offline
-    "القناة متوقفة",       # channel stopped
-    "البث غير متوفر",      # stream unavailable
-    "عذرا ، البث غير متوفر", # sorry, stream unavailable
-    "تم إيقاف البث",       # stream was stopped
-]
+
+def get_sandbox_errors() -> list[str]:
+    """Returns the current list of dynamic sandbox error phrases."""
+    return list(_DYNAMIC_SANDBOX_ERRORS)
 
 # Timeouts in milliseconds (configurable via env vars).
 _DEFAULT_TIMEOUT_MS = int(os.environ.get("PROBE_TIMEOUT_MS", 14_000))
@@ -98,20 +58,23 @@ def _build_probe_html(url: str) -> str:
 def _check_frames_for_errors(page) -> str | None:
     """
     Iterates all frames on the page and checks rendered text and content for
-    known sandbox rejection and fatal error phrases.
+    dynamic sandbox error phrases loaded from Google Sheets.
     Returns the matched error phrase string if found, otherwise None.
     """
+    if not _DYNAMIC_SANDBOX_ERRORS:
+        return None
+
     for frame in page.frames:
         try:
             text = (frame.inner_text("body", timeout=500) or "").lower()
-            for phrase in _SANDBOX_ERROR_PHRASES:
+            for phrase in _DYNAMIC_SANDBOX_ERRORS:
                 if phrase in text:
                     return phrase
         except Exception:
             pass
         try:
             content = (frame.content() or "").lower()
-            for phrase in _SANDBOX_ERROR_PHRASES:
+            for phrase in _DYNAMIC_SANDBOX_ERRORS:
                 if phrase in content:
                     return phrase
         except Exception:
@@ -124,8 +87,8 @@ def probe_url(url: str, timeout_ms: int = None) -> dict:
     Tests whether a candidate iframe URL works inside a sandboxed iframe.
 
     Returns:
-        {"status": "NO", "failure_reason": "...", "error_phrase": "..."}  -> If blocked by sandbox / HTTP error / fatal error.
-        {"status": "--", "failure_reason": "UNVERIFIED", "error_phrase": None} -> If rendered without sandbox errors.
+        {"status": "NO", "error_phrase": "..."}  -> If blocked by sandbox / HTTP error / error phrase.
+        {"status": "--", "error_phrase": None}   -> If rendered without sandbox errors.
     """
     if timeout_ms is None:
         timeout_ms = _DEFAULT_TIMEOUT_MS
@@ -138,11 +101,11 @@ def probe_url(url: str, timeout_ms: int = None) -> dict:
     try:
         r_pre = requests.get(clean_url, headers={**DEFAULT_HEADERS, "Referer": "https://footyy.footyy.com/"}, timeout=8)
         if r_pre.status_code in (404, 410, 500, 502, 503):
-            return {"status": "NO", "failure_reason": f"HTTP_{r_pre.status_code}", "error_phrase": f"HTTP {r_pre.status_code}"}
+            return {"status": "NO", "error_phrase": f"HTTP {r_pre.status_code}"}
         sample_text = r_pre.text[:2048].lower()
-        for phrase in _SANDBOX_ERROR_PHRASES:
+        for phrase in _DYNAMIC_SANDBOX_ERRORS:
             if phrase in sample_text:
-                return {"status": "NO", "failure_reason": "PRECHECK_ERROR_PHRASE", "error_phrase": phrase}
+                return {"status": "NO", "error_phrase": phrase}
     except Exception:
         pass
 
@@ -151,7 +114,7 @@ def probe_url(url: str, timeout_ms: int = None) -> dict:
         from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
     except ImportError:
         logger.error("iframe_validator: Playwright is not installed. Run: playwright install chromium")
-        return {"status": "--", "failure_reason": "PLAYWRIGHT_NOT_INSTALLED", "error_phrase": None}
+        return {"status": "--", "error_phrase": None}
 
     http_error_code = None
 
@@ -192,7 +155,7 @@ def probe_url(url: str, timeout_ms: int = None) -> dict:
                 page.goto(data_uri, timeout=timeout_ms, wait_until="domcontentloaded")
             except PlaywrightTimeout:
                 browser.close()
-                return {"status": "--", "failure_reason": "TIMEOUT", "error_phrase": "page load timeout"}
+                return {"status": "--", "error_phrase": "page load timeout"}
 
             # Allow settle time for delayed sandbox-detection scripts to fire
             try:
@@ -203,18 +166,19 @@ def probe_url(url: str, timeout_ms: int = None) -> dict:
             # 1. Main frame HTTP status error check
             if http_error_code:
                 browser.close()
-                return {"status": "NO", "failure_reason": f"HTTP_FRAME_ERROR_{http_error_code}", "error_phrase": f"HTTP {http_error_code}"}
+                return {"status": "NO", "error_phrase": f"HTTP {http_error_code}"}
 
-            # 2. Sandbox rejection or fatal error phrase in rendered DOM
+            # 2. Sandbox rejection or error phrase in rendered DOM
             matched_phrase = _check_frames_for_errors(page)
             if matched_phrase:
                 browser.close()
-                return {"status": "NO", "failure_reason": "SANDBOX_REJECTED", "error_phrase": matched_phrase}
+                return {"status": "NO", "error_phrase": matched_phrase}
 
             # 3. Not blocked by sandbox -> Unverified candidate (ready for manual review)
             browser.close()
-            return {"status": "--", "failure_reason": "UNVERIFIED", "error_phrase": None}
+            return {"status": "--", "error_phrase": None}
 
     except Exception as ex:
         logger.warning(f"iframe_validator: Unhandled probe error for {url}: {ex}")
-        return {"status": "--", "failure_reason": "PROBE_ERROR", "error_phrase": None}
+        return {"status": "--", "error_phrase": None}
+

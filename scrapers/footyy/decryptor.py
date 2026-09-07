@@ -39,7 +39,7 @@ def _cryptojs_aes_decrypt(ciphertext_b64: str, passphrase: str) -> str:
 
 def _extract_stream_from_decrypted(decrypted: str, target_id: str | None) -> dict | None:
     """
-    Parses a Shaka MPD manifest URL and ClearKey pairs (k1:k2) from decrypted Blogma JS.
+    Parses a DASH MPD manifest URL and ClearKey pairs (k1:k2) from decrypted Blogma JS.
     Handles three cases: targeted channel block, multi-channel canais object, single manifest.
     """
     # Case 1: Named channel block — e.g. "ds": { url: "...", k1: "...", k2: "..." }
@@ -94,21 +94,21 @@ def _build_stream_result(raw_url: str, context: str) -> dict | None:
     m_k1 = re.search(r'k1\s*[:=]\s*[\'"]([a-fA-F0-9]+)[\'"]', context)
     m_k2 = re.search(r'k2\s*[:=]\s*[\'"]([a-fA-F0-9]+)[\'"]', context)
     if m_k1 and m_k2:
-        return {"type": "shaka", "manifest": manifest_url, "keys": {m_k1.group(1): m_k2.group(1)}}
+        return {"type": "dash", "manifest": manifest_url, "keys": {m_k1.group(1): m_k2.group(1)}}
 
     keys = {}
     for km in re.finditer(r'[\'"]([a-fA-F0-9]{16,32})[\'"]\s*:\s*[\'"]([a-fA-F0-9]{16,32})[\'"]', context):
         keys[km.group(1)] = km.group(2)
 
-    return {"type": "shaka", "manifest": manifest_url, "keys": keys}
+    return {"type": "dash", "manifest": manifest_url, "keys": keys}
 
 
 def resolve_blogma_stream(url: str, proxies: dict = None) -> dict | None:
     """
     Decrypts a Blogma helper page (sewzzy, swxzyy, nazity, kkzawe, etc.) to extract
-    the native Shaka DASH manifest and ClearKey pairs, bypassing browser anti-embed checks.
+    the native DASH manifest and ClearKey pairs, bypassing browser anti-embed checks.
     Supports both direct plaintext DASH definitions and two-layer CryptoJS AES __payload ciphertext.
-    Returns a stream dict with type 'shaka' or 'hls', or None if decryption fails.
+    Returns a stream dict with type 'dash' or 'hls', or None if decryption fails.
     """
     headers = {**DEFAULT_HEADERS, "Referer": "https://m.blogma.sbs/"}
     try:

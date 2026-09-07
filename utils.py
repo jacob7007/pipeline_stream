@@ -310,6 +310,15 @@ def get_match_default_duration_minutes() -> int:
         return 180
 
 
+def get_stream_glitch_grace_minutes() -> int:
+    """Returns STREAM_GLITCH_GRACE_MINUTES env var as int (default 15)."""
+    val = os.environ.get("STREAM_GLITCH_GRACE_MINUTES", "").strip()
+    try:
+        return int(val) if val else 15
+    except ValueError:
+        return 15
+
+
 def is_match_expired(kickoff_time: str | datetime, duration: int | str, now_dt: datetime, grace_minutes: int = None) -> bool:
     """
     Returns True if the current time is at or past the match expiration time (Kickoff + Duration + Grace Period).
@@ -391,13 +400,18 @@ def is_match_starting_soon(
     # Match starting within threshold_minutes (e.g. 60m) or match already kicked off (<= 0)
     return time_until_kickoff <= threshold_minutes * 60
 
-def get_status_priority(status: str) -> int:
-    """Returns numeric priority for match status. Higher value = higher priority."""
-    if status == "live":
-        return 2
-    if status == "upcoming":
+def get_status_priority(status: str, has_stream: bool = True) -> int:
+    """Returns numeric priority for match status. Higher value = higher priority.
+    Matches marked 'live' only receive top priority if they actually have an active stream / channel / link.
+    Live matches without streams ('soon') are deprioritized below live streaming matches.
+    """
+    s = (status or "").strip().lower()
+    if s == "live":
+        return 2 if has_stream else 1
+    if s == "upcoming":
         return 1
     return 0
+
 
 def get_allowed_chat_ids(extra_chat_id: str = None) -> list:
     """Parses TELEGRAM_ALLOWED_CHAT_IDS env var into a list, optionally adding an extra chat ID."""

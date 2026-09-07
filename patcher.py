@@ -1,7 +1,7 @@
 import re
 import json
 import base64
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 
 def encode_channels_payload(channels: list[dict]) -> str:
     """
@@ -11,6 +11,21 @@ def encode_channels_payload(channels: list[dict]) -> str:
     raw_json = json.dumps(channels, ensure_ascii=False)
     uri_encoded = quote(raw_json)
     return base64.b64encode(uri_encoded.encode("utf-8")).decode("utf-8")
+
+def decode_channels_payload(payload_str: str) -> list[dict]:
+    """
+    Decodes a URL-encoded Base64 string back to a list of channel dictionaries.
+    Inverse of encode_channels_payload.
+    """
+    if not payload_str or not isinstance(payload_str, str):
+        return []
+    try:
+        decoded_b64 = base64.b64decode(payload_str.encode("utf-8")).decode("utf-8")
+        raw_json = unquote(decoded_b64)
+        data = json.loads(raw_json)
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
 
 def patch_player_payload(content: str, channels: list[dict]) -> str:
     """

@@ -31,7 +31,7 @@ from translation_manager import find_existing_translation, resolve_missing_teams
 import channel_resolver
 from channel_resolver import resolve_match_channels
 import patcher
-from scrapers import SCRAPER_PLUGINS
+from scrapers import SCRAPER_PLUGINS, ScraperPluginError
 from normalization import (
     are_arabic_names_equivalent,
     are_english_teams_equivalent,
@@ -231,23 +231,30 @@ def migrate_matches_cache_translations(matches_cache: dict, team_translations: d
     return matches_cache
 
 
-def _fetch_single_url_matches(url: str, source_tz, clean_url: str, max_url_len: int) -> tuple[list, str]:
+def _fetch_single_url_matches(url: str, source_tz, clean_url: str, max_url_len: int) -> tuple[list, str, str]:
     site_tz = resolve_timezone(source_tz)
     site_now = datetime.now(site_tz).replace(tzinfo=None)
     default_date = (site_now + timedelta(days=1)).strftime("%Y-%m-%d") if "tomorrow" in url.lower() else site_now.strftime("%Y-%m-%d")
+
+    padded_url = clean_url.ljust(max_url_len)
+
+    # Generic pre-flight: query plugins to identify candidate plugin from URL before HTTP GET
+    candidate_plugin = next((p for p in SCRAPER_PLUGINS if hasattr(p, "can_handle_url") and p.can_handle_url(url)), None)
+    inferred_source = (
+        candidate_plugin.get_source_name(url) if hasattr(candidate_plugin, "get_source_name")
+        else getattr(candidate_plugin, "PLUGIN_NAME", candidate_plugin.__name__.split(".")[-1])
+    ) if candidate_plugin else ""
 
     try:
         resp = requests.get(url, headers=DEFAULT_HEADERS, timeout=20, proxies=get_request_proxies())
         resp.raise_for_status()
     except Exception as e:
-        padded_url = clean_url.ljust(max_url_len)
         logger.error(f"Scraper: Fetching matches from: {padded_url}  :  ❌  Failed: {e}")
-        return [], str(e)
+        return [], str(e), inferred_source
 
     soup = BeautifulSoup(resp.text, "html.parser")
-    handler = next((p for p in SCRAPER_PLUGINS if p.can_handle(soup)), None)
+    handler = next((p for p in SCRAPER_PLUGINS if p.can_handle(soup)), candidate_plugin)
     if handler is None:
-        padded_url = clean_url.ljust(max_url_len)
         logger.error(f"Scraper: Fetching matches from: {padded_url}  :  ❌  No plugin recognized HTML structure.")
         telegram_token = get_telegram_bot_token()
         alert_chat_ids = get_allowed_chat_ids()
@@ -255,14 +262,25 @@ def _fetch_single_url_matches(url: str, source_tz, clean_url: str, max_url_len: 
             telegram_token, alert_chat_ids,
             f"⚠️ Scraper: Unrecognized website structure\n\nURL: {url}\n\nNo scraper plugin matched."
         )
-        return [], "No plugin recognized HTML structure"
+        return [], "No plugin recognized HTML structure", inferred_source
 
-    raw_matches = handler.parse_matches(soup, url, default_date, source_tz)
-    plugin_name = handler.__name__.split(".")[-1]
+    source_name = (
+        handler.get_source_name(url) if hasattr(handler, "get_source_name")
+        else getattr(handler, "PLUGIN_NAME", handler.__name__.split(".")[-1])
+    )
+    try:
+        raw_matches = handler.parse_matches(soup, url, default_date, source_tz)
+    except ScraperPluginError as spe:
+        logger.warning(f"Scraper: Fetching matches from: {padded_url}  :  ⚠️  {spe.message}")
+        return [], spe.message, source_name
+    except Exception as e:
+        logger.error(f"Scraper: Parsing matches from {padded_url} failed: {e}")
+        return [], str(e), source_name
+
     for match in raw_matches:
-        match["plugin"] = plugin_name
-    logger.info(f"Scraper: Fetching matches from: {clean_url}  :  {logger.COLOR_CYAN}➤{logger.COLOR_RESET}  Found {len(raw_matches)} matches.")
-    return raw_matches, ""
+        match["plugin"] = source_name
+    logger.info(f"Scraper: Fetching matches from: {padded_url}  :  {logger.COLOR_CYAN}➤{logger.COLOR_RESET}  Found {len(raw_matches)} matches.")
+    return raw_matches, "", source_name
 
 
 def _is_duplicate_raw_match(match_data: dict, existing_matches: list) -> bool:
@@ -283,18 +301,24 @@ def _is_duplicate_raw_match(match_data: dict, existing_matches: list) -> bool:
     return False
 
 
-def _fetch_and_parse_urls(urls_to_scrape: list) -> tuple[list, set]:
+def _fetch_and_parse_urls(urls_to_scrape: list) -> tuple[list, set, dict]:
     matches_to_process = []
     unique_team_names = set()
     errors = []
+    plugin_health = {}
 
     max_url_len = max((len(url.split("://")[-1].rstrip("/")) for url, _ in urls_to_scrape), default=0)
 
     for url, source_tz in urls_to_scrape:
         clean_url = url.split("://")[-1].rstrip("/")
-        raw_matches, err = _fetch_single_url_matches(url, source_tz, clean_url, max_url_len)
-        if err:
-            errors.append(f"{clean_url}: {err}")
+        raw_matches, err, plugin_name = _fetch_single_url_matches(url, source_tz, clean_url, max_url_len)
+        if plugin_name:
+            if err:
+                errors.append(f"{clean_url}: {err}")
+                if plugin_name not in plugin_health:
+                    plugin_health[plugin_name] = False
+            else:
+                plugin_health[plugin_name] = True
 
         site_matches = []
         for match_data in raw_matches:
@@ -313,7 +337,7 @@ def _fetch_and_parse_urls(urls_to_scrape: list) -> tuple[list, set]:
     if not matches_to_process and errors:
         raise ConnectionError("; ".join(errors))
 
-    return matches_to_process, unique_team_names
+    return matches_to_process, unique_team_names, plugin_health
 
 
 
@@ -393,6 +417,10 @@ def _build_match_event(match_data: dict, team_translations: dict, matches_cache:
     existing_link = "" if status_class == "finished" else (cached_match.get("link", "") if cached_match else "")
     channels_payload = patcher.encode_channels_payload(channels) if channels else ""
 
+    plugin_name = match_data.get("plugin", "") or (cached_match.get("plugin", "") if cached_match else "")
+    cached_sources = cached_match.get("sources", []) if cached_match else []
+    sources = list(dict.fromkeys([p for p in (cached_sources + ([plugin_name] if plugin_name else [])) if p]))
+
     event = {
         "event_id": event_id,
         "team1": {
@@ -410,7 +438,9 @@ def _build_match_event(match_data: dict, team_translations: dict, matches_cache:
         "channels": channels,
         "link": existing_link,
         "status_class": status_class,
-        "match_url": match_url
+        "match_url": match_url,
+        "plugin": plugin_name,
+        "sources": sources
     }
 
     cache_entry = {
@@ -428,6 +458,8 @@ def _build_match_event(match_data: dict, team_translations: dict, matches_cache:
             "kickoff_time": format_to_human_time(formatted_time),
             "duration": get_match_default_duration_minutes(),
             "status_class": status_class,
+            "plugin": plugin_name,
+            "sources": sources,
             "last_updated": now_dt.isoformat()
         }
     }
@@ -448,8 +480,8 @@ def _merge_channel_lists(channels_a: list, channels_b: list) -> list:
         if not isinstance(ch, dict):
             continue
         ctype = ch.get("type", "").strip().lower()
-        if ctype == "shaka":
-            endpoint = ("shaka", ch.get("manifest", "").strip())
+        if ctype == "dash":
+            endpoint = ("dash", ch.get("manifest", "").strip())
         elif ctype == "hls":
             endpoint = ("hls", ch.get("url", "").strip())
         elif ctype == "iframe":
@@ -479,7 +511,15 @@ def _merge_channel_lists(channels_a: list, channels_b: list) -> list:
     return merged
 
 
-def _process_matches(matches_to_process: list, team_translations: dict, matches_cache: dict, now_dt: datetime, proxies: dict) -> tuple:
+def _process_matches(
+    matches_to_process: list,
+    team_translations: dict,
+    matches_cache: dict,
+    now_dt: datetime,
+    proxies: dict,
+    slots: list = None,
+    plugin_health: dict = None
+) -> tuple:
     parsed_matches_map = {}
     updated_matches_cache = {}
 
@@ -522,6 +562,8 @@ def _process_matches(matches_to_process: list, team_translations: dict, matches_
             if existing_target_id:
                 existing_ev = parsed_matches_map[existing_target_id]
                 existing_ev["channels"] = _merge_channel_lists(existing_ev.get("channels", []), event.get("channels", []))
+                merged_sources = list(dict.fromkeys(existing_ev.get("sources", []) + event.get("sources", [])))
+                existing_ev["sources"] = merged_sources
                 if event.get("status_class") == "live" and existing_ev.get("status_class") != "live":
                     existing_ev["status_class"] = "live"
                 if not existing_ev.get("link") and event.get("link"):
@@ -536,6 +578,7 @@ def _process_matches(matches_to_process: list, team_translations: dict, matches_
                     existing_status = updated_matches_cache[target_key].get("status_class")
                     if existing_status == "live" and entry.get("status_class") != "live":
                         continue
+                    entry["sources"] = list(dict.fromkeys(updated_matches_cache[target_key].get("sources", []) + entry.get("sources", [])))
                 updated_matches_cache[target_key] = entry
 
             # Keep cache channels payload in sync with merged channels
@@ -543,6 +586,50 @@ def _process_matches(matches_to_process: list, team_translations: dict, matches_
                 merged_ch = parsed_matches_map[target_key].get("channels", [])
                 if merged_ch:
                     updated_matches_cache[target_key]["channels"] = patcher.encode_channels_payload(merged_ch)
+
+    # Multi-source channel preservation:
+    # If a match was in cache with channels from a plugin that glitched on this run,
+    # preserve those cached channels alongside freshly scraped channels during the grace window
+    if matches_cache and plugin_health:
+        glitched_plugins = {p for p, is_ok in plugin_health.items() if is_ok is False}
+        if glitched_plugins:
+            for ev_id, ev in parsed_matches_map.items():
+                cached_prev = matches_cache.get(ev_id)
+                if not cached_prev:
+                    for c_id, c_entry in matches_cache.items():
+                        c_k = str(c_entry.get("kickoff_time", "")).strip()
+                        ev_k = str(ev.get("time", "")).strip()
+                        ev_human = format_to_human_time(ev_k)
+                        time_matches = (c_k and (c_k == ev_human or c_k == ev_k)) or (
+                            parse_user_styled_time(c_k) != datetime.min and parse_user_styled_time(c_k) == parse_user_styled_time(ev_k)
+                        )
+                        if time_matches:
+                            t1_a = ev["team1"]["nameEn"] or ev["team1"]["nameAr"]
+                            t2_a = ev["team2"]["nameEn"] or ev["team2"]["nameAr"]
+                            t1_c = c_entry.get("team1_en") or c_entry.get("team1_ar", "")
+                            t2_c = c_entry.get("team2_en") or c_entry.get("team2_ar", "")
+                            if (are_english_teams_equivalent(t1_a, t1_c) and are_english_teams_equivalent(t2_a, t2_c)) or \
+                               (are_arabic_names_equivalent(t1_a, t1_c) and are_arabic_names_equivalent(t2_a, t2_c)):
+                                cached_prev = c_entry
+                                break
+
+                if cached_prev and cached_prev.get("channels"):
+                    prev_sources = cached_prev.get("sources", [])
+                    if not prev_sources and cached_prev.get("plugin"):
+                        prev_sources = [cached_prev["plugin"]]
+
+                    has_glitched_source = any(p in glitched_plugins for p in prev_sources)
+                    if has_glitched_source:
+                        cached_channels = patcher.decode_channels_payload(cached_prev["channels"])
+                        if cached_channels:
+                            combined_ch = _merge_channel_lists(ev.get("channels", []), cached_channels)
+                            ev["channels"] = combined_ch
+                            if ev_id in updated_matches_cache:
+                                updated_matches_cache[ev_id]["channels"] = patcher.encode_channels_payload(combined_ch)
+                                preserved_sources = list(dict.fromkeys(updated_matches_cache[ev_id].get("sources", []) + prev_sources))
+                                updated_matches_cache[ev_id]["sources"] = preserved_sources
+                                ev["sources"] = preserved_sources
+                            logger.info(f"Scraper: Preserved cached channels from glitched source(s) for '{ev_id}'.")
 
     # Retain matches from previous cache that disappeared from competitor sources but haven't expired
     if matches_cache:
@@ -571,16 +658,40 @@ def _process_matches(matches_to_process: list, team_translations: dict, matches_
                     logger.info(f"Cache: Pruned obsolete/duplicate cache entry '{ev_id}' (superseded by active scrape).")
                     continue
 
-                # Prune unbroadcasted matches that disappeared from all competitor scrapers past kickoff with no stream
-                has_stream = bool(cached_entry.get("channels") or cached_entry.get("link"))
+                # Check if ANY of this match's source plugins glitched
+                match_sources = cached_entry.get("sources", [])
+                if not match_sources and cached_entry.get("plugin"):
+                    match_sources = [cached_entry["plugin"]]
+
+                is_plugin_glitched = bool(
+                    plugin_health and any(plugin_health.get(p) is False for p in match_sources)
+                )
+
+                # Prune unbroadcasted matches that disappeared from all competitor scrapers past kickoff with no active stream
+                has_active_link = bool(cached_entry.get("link") and str(cached_entry.get("link")).strip())
+                is_slot_active = any(
+                    s.get("event_id") == ev_id and s.get("status", "").strip().lower() in ["valid", "active"]
+                    for s in (slots or [])
+                ) if slots else has_active_link
+                has_active_stream = has_active_link and is_slot_active
+
                 dt_kickoff = parse_user_styled_time(k_time)
-                if not has_stream and dt_kickoff != datetime.min:
+                if not has_active_stream and dt_kickoff != datetime.min and cached_entry.get("status_class") != "finished":
                     if now_dt >= dt_kickoff + timedelta(minutes=15):
-                        ev_name = cached_entry.get("event_name", ev_id)
-                        logger.info(f"Cache: Pruned unbroadcasted match '{ev_name}' (disappeared from competitor sources past kickoff with no stream).")
-                        continue
+                        if not is_plugin_glitched:
+                            ev_name = cached_entry.get("event_name", ev_id)
+                            logger.info(f"Cache: Pruned unbroadcasted match '{ev_name}' (disappeared from competitor sources past kickoff with no stream).")
+                            continue
+                        else:
+                            ev_name = cached_entry.get("event_name", ev_id)
+                            glitched_names = ", ".join([p for p in match_sources if plugin_health.get(p) is False])
+                            logger.info(f"Cache: Retaining match '{ev_name}' despite missing from scrape (source plugin(s) '{glitched_names}' glitched).")
 
                 retained_entry = dict(cached_entry)
+                retained_entry["sources"] = match_sources
+                if is_plugin_glitched:
+                    retained_entry["source_glitched"] = True
+
                 # If match duration has passed or it was marked finished, ensure it stays finished and link is cleared
                 if retained_entry.get("status_class") == "finished" or is_match_ended(k_time, duration, now_dt):
                     retained_entry["status_class"] = "finished"
@@ -607,7 +718,7 @@ def scrape_live_matches(
         logger.error("SCRAPER_URLS environment variable is not set. Cannot run competitor scraper.")
         return [], [], {}, []
 
-    matches_to_process, unique_team_names = _fetch_and_parse_urls(SCRAPER_URLS)
+    matches_to_process, unique_team_names, plugin_health = _fetch_and_parse_urls(SCRAPER_URLS)
     if not matches_to_process:
         return [], [], {}, []
 
@@ -651,7 +762,7 @@ def scrape_live_matches(
 
     now_dt = get_now_local()
     parsed_matches, updated_matches_cache = _process_matches(
-        matches_to_process, team_translations, matches_cache, now_dt, get_request_proxies()
+        matches_to_process, team_translations, matches_cache, now_dt, get_request_proxies(), slots=slots, plugin_health=plugin_health
     )
 
     return parsed_matches, new_translations_list, updated_matches_cache, alias_updates

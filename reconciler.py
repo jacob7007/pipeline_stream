@@ -1,6 +1,16 @@
 import re
+from datetime import datetime, timedelta
 import patcher
-from utils import get_slot_label, get_event_display_name, format_to_human_time
+import logger
+from utils import (
+    get_slot_label,
+    get_event_display_name,
+    format_to_human_time,
+    parse_user_styled_time,
+    get_match_default_duration_minutes,
+    get_stream_glitch_grace_minutes,
+    get_now_local,
+)
 
 
 def _get_slot_identifier(slot: dict) -> str:
@@ -8,7 +18,57 @@ def _get_slot_identifier(slot: dict) -> str:
     return str(slot.get("slot") or slot.get("row_num") or id(slot))
 
 
-def _categorize_sheet_slots(sheet_slots: list, scraped_map: dict) -> tuple:
+def _is_slot_shielded(slot: dict, matches_cache: dict, now_dt: datetime) -> bool:
+    """
+    Evaluates whether an active slot whose event is missing from the current scrape
+    should be shielded against transient competitor scraper glitches.
+    Returns True if the match is still within its active duration window and within
+    the grace period (or its source plugin glitched), False if it should be freed.
+    """
+    ev_id = slot.get("event_id", "").strip()
+    if not ev_id or not matches_cache or ev_id not in matches_cache:
+        return False
+
+    cached_match = matches_cache[ev_id]
+    if cached_match.get("status_class") == "finished":
+        return False
+
+    k_time = cached_match.get("kickoff_time", "") or slot.get("kickoff_time", "")
+    duration = int(cached_match.get("duration") or get_match_default_duration_minutes())
+    dt_kickoff = parse_user_styled_time(k_time)
+
+    # If kickoff time could not be parsed, don't shield
+    if dt_kickoff == datetime.min or not now_dt:
+        return False
+
+    # If match duration has expired, do not shield (match has ended)
+    if now_dt >= dt_kickoff + timedelta(minutes=duration):
+        return False
+
+    # If source plugin was explicitly marked as glitched in this run
+    if cached_match.get("source_glitched"):
+        return True
+
+    # Check elapsed time since last successful update
+    grace_minutes = get_stream_glitch_grace_minutes()
+    last_updated_str = cached_match.get("last_updated")
+    if last_updated_str:
+        try:
+            last_updated_dt = datetime.fromisoformat(last_updated_str)
+            elapsed_minutes = (now_dt - last_updated_dt).total_seconds() / 60.0
+            if elapsed_minutes <= grace_minutes:
+                return True
+        except Exception:
+            pass
+
+    # If match is in progress or starting soon and within grace window past kickoff
+    if now_dt < dt_kickoff + timedelta(minutes=grace_minutes):
+        return True
+
+    return False
+
+
+def _categorize_sheet_slots(sheet_slots: list, scraped_map: dict, matches_cache: dict = None, now_dt: datetime = None) -> tuple:
     """Categorizes sheet slots into active matched, to-be-freed, and already-free lists."""
     active_matched = []
     to_be_freed = []
@@ -23,6 +83,11 @@ def _categorize_sheet_slots(sheet_slots: list, scraped_map: dict) -> tuple:
             # Slot is actively assigned to an event
             if ev_id and ev_name not in ["", "free"]:
                 if ev_id in scraped_map:
+                    active_matched.append(slot)
+                elif _is_slot_shielded(slot, matches_cache, now_dt):
+                    slot_label = get_slot_label(slot)
+                    display_name = slot.get("event_name") or ev_id
+                    logger.info(f"Reconciler: {slot_label} ('{display_name}') shielded against scraper glitch. Stream preserved.")
                     active_matched.append(slot)
                 else:
                     to_be_freed.append(slot)
@@ -86,7 +151,11 @@ def _evaluate_matched_slots(
     """Checks if matched active slots require stream channel updates or metadata sync."""
     for slot in active_matched:
         ev_id = slot["event_id"]
-        event = scraped_map[ev_id]
+        event = scraped_map.get(ev_id)
+        if not event:
+            # Slot is shielded against scraper glitch; existing stream remains active without modification
+            continue
+
         event_name = get_event_display_name(event)
         slot_label = get_slot_label(slot)
 
@@ -132,7 +201,8 @@ def reconcile_state(
     sheet_slots: list,
     scraped_events: list,
     matches_cache: dict = None,
-    player_posts_map: dict = None
+    player_posts_map: dict = None,
+    now_dt: datetime = None
 ) -> list:
     """
     Compares the Google Sheet slot states with the scraped live events.
@@ -141,6 +211,9 @@ def reconcile_state(
     """
     if not sheet_slots:
         return []
+
+    if now_dt is None:
+        now_dt = get_now_local()
 
     # Only active/upcoming matches should occupy stream slots
     active_candidates = [
@@ -151,7 +224,7 @@ def reconcile_state(
     # Limit candidate events strictly to available physical slot capacity
     target_events = active_candidates[:len(sheet_slots)]
     scraped_map = {e["event_id"]: e for e in target_events}
-    active_matched, to_be_freed, already_free = _categorize_sheet_slots(sheet_slots, scraped_map)
+    active_matched, to_be_freed, already_free = _categorize_sheet_slots(sheet_slots, scraped_map, matches_cache, now_dt)
 
     free_slots_queue = already_free + to_be_freed
     unassigned_events = [e for e in target_events if e["event_id"] not in [b["event_id"] for b in active_matched]]

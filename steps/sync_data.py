@@ -130,7 +130,15 @@ def assemble_matches_feed(matches_cache: dict) -> list[dict]:
         if not is_dup:
             deduped_feed.append(item)
 
-    deduped_feed.sort(key=lambda m: (-get_status_priority(m["_status_class"]), m["time"]))
+    deduped_feed.sort(
+        key=lambda m: (
+            -get_status_priority(
+                m["_status_class"],
+                has_stream=bool(m.get("link") and str(m.get("link")).strip())
+            ),
+            m["time"]
+        )
+    )
     for idx, item in enumerate(deduped_feed, start=1):
         item["id"] = idx
 
@@ -168,6 +176,9 @@ def display_data_matches(active_matches_list: list):
         elif m.get("link"):
             status = "LIVE"
             status_styled = f"{logger.COLOR_GREEN}{logger.COLOR_BOLD}{status:<{max_status_len}}{logger.COLOR_RESET}"
+        elif status_val == "live":
+            status = "SOON"
+            status_styled = f"{logger.COLOR_YELLOW}{status:<{max_status_len}}{logger.COLOR_RESET}"
         else:
             status = "UPCOMING"
             status_styled = f"{logger.COLOR_YELLOW}{status:<{max_status_len}}{logger.COLOR_RESET}"
@@ -248,9 +259,12 @@ def _update_matches_cache_links(scraped_events: list, matches_cache: dict, updat
             cached_match["status_class"] = ev.get("status_class", cached_match.get("status_class", "upcoming"))
             if ev.get("channels"):
                 cached_match["channels"] = patcher.encode_channels_payload(ev["channels"])
+            if ev.get("sources"):
+                cached_match["sources"] = ev["sources"]
 
         permalink_url = ""
-        if ev_id in slot_by_event_id and cached_match.get("status_class") != "finished":
+        is_assigned_to_active_slot = ev_id in slot_by_event_id
+        if is_assigned_to_active_slot and cached_match.get("status_class") != "finished":
             s = slot_by_event_id[ev_id]
             blog_post_id = s.get("blog_post_id", "")
             if blog_post_id and blog_post_id in public_posts_map:
@@ -263,7 +277,11 @@ def _update_matches_cache_links(scraped_events: list, matches_cache: dict, updat
                 except Exception:
                     pass
 
-        cached_match["link"] = permalink_url
+        # If assigned to active slot and not finished, preserve discovered or existing permalink
+        if is_assigned_to_active_slot and cached_match.get("status_class") != "finished":
+            cached_match["link"] = permalink_url or cached_match.get("link", "")
+        else:
+            cached_match["link"] = ""
 
 
 def run(

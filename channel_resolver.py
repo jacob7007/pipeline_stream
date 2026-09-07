@@ -5,13 +5,20 @@ import iframe_validator
 from scrapers import SCRAPER_PLUGINS
 from utils import DEFAULT_HEADERS, format_to_human_time, get_now_local, resolve_timezone
 
-# Build normalized plugin registry using short module names
-PLUGIN_REGISTRY = {p.__name__.split(".")[-1]: p for p in SCRAPER_PLUGINS}
+# Build normalized plugin registry supporting PLUGIN_NAME and module name
+PLUGIN_REGISTRY = {}
+for p in SCRAPER_PLUGINS:
+    p_name = getattr(p, "PLUGIN_NAME", None)
+    if p_name:
+        PLUGIN_REGISTRY[p_name] = p
+    PLUGIN_REGISTRY[p.__name__.split(".")[-1]] = p
 
+# ---------------------------------------------------------------------------
 # ---------------------------------------------------------------------------
 # Module-level state — initialised by init_domain_cache() at pipeline start.
 # ---------------------------------------------------------------------------
-_domain_cache: dict = {}       # {domain: {"status": "OK"|"NO"|"--", "failure_reason": ..., "last_tested": ...}}
+_domain_cache: dict = {}       # {domain: {"status": "OK"|"NO"|"--"}}
+_p1_rules: list = []           # [(domain, quality_badge), ...] (loaded dynamically from Google Sheets)
 _domain_cache_dirty: bool = False   # True when any new probe result was written this run
 _pending_alerts: list = []     # "--" results waiting for end-of-run Telegram dispatch
 
@@ -22,10 +29,17 @@ _pending_alerts: list = []     # "--" results waiting for end-of-run Telegram di
 
 def init_domain_cache(sheets_client, spreadsheet_name: str) -> None:
     """Loads the _cache_domains sheet into memory at the start of the pipeline run."""
-    global _domain_cache, _domain_cache_dirty, _pending_alerts
-    _domain_cache = sheets_module.load_domain_cache(sheets_client, spreadsheet_name)
+    global _domain_cache, _p1_rules, _domain_cache_dirty, _pending_alerts
+    _domain_cache, _p1_rules, sandbox_errors = sheets_module.load_domain_cache(sheets_client, spreadsheet_name)
+    iframe_validator.set_sandbox_errors(sandbox_errors)
     _domain_cache_dirty = False
     _pending_alerts = []
+
+
+def set_p1_rules(rules: list) -> None:
+    """Sets dynamic P1 rules (useful for testing)."""
+    global _p1_rules
+    _p1_rules = list(rules)
 
 
 def flush_domain_cache(sheets_client, spreadsheet_name: str) -> None:
@@ -97,7 +111,8 @@ def _is_blocked_by_headers(headers: dict) -> bool:
 def _is_blocked_by_content(response_text: str) -> bool:
     """Returns True if the response body signals an anti-embed or domain block."""
     sample = (response_text or "")[:4096].lower()
-    return any(phrase in sample for phrase in iframe_validator._SANDBOX_ERROR_PHRASES)
+    errors = iframe_validator.get_sandbox_errors()
+    return any(phrase in sample for phrase in errors)
 
 
 # ---------------------------------------------------------------------------
@@ -108,7 +123,7 @@ def is_stream_playable(ch: dict, proxies: dict = None, match_context: dict = Non
     """
     Verifies a channel is reachable and genuinely playable — not just HTTP 200.
     Validation strategy per channel type:
-      1. Shaka DASH: manifest reachable + ClearKeys present for encrypted streams + MPD content check
+      1. DASH: manifest reachable + ClearKeys present for encrypted streams + MPD content check
       2. HLS: URL reachable + response starts with #EXTM3U (not an HTML error page)
       3. Iframe: HTTP reachability + header check + content check + domain cache lookup + browser validation
          (Playwright browser only runs for domains not yet in the _cache_domains sheet)
@@ -120,7 +135,7 @@ def is_stream_playable(ch: dict, proxies: dict = None, match_context: dict = Non
         return False
     ctype = ch.get("type", "").strip().lower()
 
-    if ctype == "shaka":
+    if ctype == "dash":
         manifest = ch.get("manifest", "")
         keys = ch.get("keys", {})
         if not manifest or not manifest.startswith(("http://", "https://")):
@@ -189,7 +204,7 @@ def is_stream_playable(ch: dict, proxies: dict = None, match_context: dict = Non
         cached = _domain_cache.get(domain) if domain else None
 
         if cached:
-            status = cached.get("status", "")
+            status = cached.get("status", "") if isinstance(cached, dict) else str(cached)
             if status == "OK":
                 return True
             if status == "NO":
@@ -208,19 +223,13 @@ def is_stream_playable(ch: dict, proxies: dict = None, match_context: dict = Non
 
         result = iframe_validator.probe_url(url)
         probe_status = result.get("status", "--")
-        probe_reason = result.get("failure_reason", "UNKNOWN")
         error_phrase = result.get("error_phrase", "")
 
         # Persist result to in-memory cache (flushed to Sheets at end of run).
         global _domain_cache_dirty
-        now_str = format_to_human_time(
-            get_now_local().replace(tzinfo=resolve_timezone(None)).isoformat()
-        )
         if domain:
             _domain_cache[domain] = {
                 "status": probe_status,
-                "failure_reason": probe_reason,
-                "last_tested": now_str,
             }
             _domain_cache_dirty = True
 
@@ -253,31 +262,34 @@ def is_stream_playable(ch: dict, proxies: dict = None, match_context: dict = Non
 # Channel priority ordering
 # ---------------------------------------------------------------------------
 
-def get_channel_priority(ch: dict) -> int:
+def get_channel_priority(ch: dict) -> tuple:
     """
-    Returns priority tier for channel ordering (lower number = higher priority):
-    Tier 1: OK.ru
-    Tier 2: YouTube
-    Tier 3: SIR TV / YasirTV Player embeds
-    Tier 4: FHD DRM (Shaka ClearKey DASH)
-    Tier 5: Native HLS (.m3u8)
-    Tier 6: Other web iframes / embeds
+    Returns priority rank tuple (tier, sub_rank) for channel ordering (lower = higher priority):
+    Tier 1: Dynamic P1 domains from Google Sheets (sub-ranked by order in sheets)
+    Tier 2: Other iFrames (any iframe not matching P1 sheet domains)
+    Tier 3: Native HLS (.m3u8)
+    Tier 4: DASH (.mpd)
     """
     ctype = (ch.get("type") or "").strip().lower()
-    quality = (ch.get("quality") or "").strip().lower()
     url = (ch.get("url") or ch.get("manifest") or "").lower()
 
-    if quality == "ok.ru" or "ok.ru" in url:
-        return 1
-    if quality == "youtube" or "youtube.com" in url or "youtu.be" in url:
-        return 2
-    if "yasirtv.com" in url or "sir-tv" in url or "tvsir" in url:
-        return 3
-    if ctype == "shaka" or "drm" in quality:
-        return 4
-    if ctype == "hls" or "hls" in quality:
-        return 5
-    return 6
+    if ctype == "iframe":
+        domain = _extract_domain(url)
+        # Check dynamic P1 rules from Google Sheets (Zero hardcoded rules)
+        for idx, (p1_dom, p1_qual) in enumerate(_p1_rules):
+            if domain == p1_dom or domain.endswith("." + p1_dom) or p1_dom in url:
+                if p1_qual:
+                    ch["quality"] = p1_qual
+                return (1, idx)
+        return (2, 999)
+
+    if ctype == "hls":
+        return (3, 999)
+
+    if ctype == "dash":
+        return (4, 999)
+
+    return (2, 999)
 
 
 # ---------------------------------------------------------------------------
@@ -302,7 +314,8 @@ def resolve_match_channels(
     if not match_url or status_class == "finished" or is_far_future:
         return []
 
-    plugin = PLUGIN_REGISTRY.get(plugin_name)
+    engine_name = plugin_name.split("/")[0] if "/" in plugin_name else plugin_name
+    plugin = PLUGIN_REGISTRY.get(plugin_name) or PLUGIN_REGISTRY.get(engine_name)
     if plugin is None:
         logger.error(f"No plugin found in registry for: '{plugin_name}'")
         return []

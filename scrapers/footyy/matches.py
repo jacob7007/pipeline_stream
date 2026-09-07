@@ -5,6 +5,8 @@ from bs4 import BeautifulSoup
 import requests
 import logger
 from utils import DEFAULT_HEADERS
+from scrapers.exceptions import ScraperPluginError
+
 
 
 def can_handle(soup: BeautifulSoup) -> bool:
@@ -90,14 +92,15 @@ def parse_matches(soup: BeautifulSoup, source_url: str, default_date: str, sourc
             widget_script = widget_soup.select_one("script[data-matches-widget]")
 
     if not widget_script or not widget_script.string:
-        logger.warning(f"Plugin (footyy/matches): No matches widget JSON found at {source_url}")
-        return []
+        raise ScraperPluginError("No matches widget JSON found.", plugin_name="footyy")
 
     try:
         raw_matches = json.loads(widget_script.string.strip())
     except Exception as e:
-        logger.error(f"Plugin (footyy/matches): Failed to parse matches widget JSON: {e}")
-        return []
+        raise ScraperPluginError(f"Failed to parse matches widget JSON: {e}", plugin_name="footyy")
+
+    if not raw_matches:
+        raise ScraperPluginError("FooTyy widget returned 0 matches.", plugin_name="footyy")
 
     results = []
     # FooTyy widget timestamps are ISO 8601 UTC — treat as UTC unless caller overrides
