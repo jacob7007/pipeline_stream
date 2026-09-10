@@ -276,10 +276,17 @@ def get_channel_priority(ch: dict) -> tuple:
     if ctype == "iframe":
         domain = _extract_domain(url)
         # Check dynamic P1 rules from Google Sheets (Zero hardcoded rules)
-        for idx, (p1_dom, p1_qual) in enumerate(_p1_rules):
+        for idx, rule in enumerate(_p1_rules):
+            p1_dom = rule[0]
+            p1_qual = rule[1]
+            p1_sandbox = rule[2] if len(rule) > 2 else False
             if domain == p1_dom or domain.endswith("." + p1_dom) or p1_dom in url:
                 if p1_qual:
                     ch["quality"] = p1_qual
+                if p1_sandbox:
+                    ch["sandbox"] = "allow-scripts allow-same-origin allow-presentation allow-forms"
+                else:
+                    ch.pop("sandbox", None)
                 return (1, idx)
         return (2, 999)
 
@@ -307,7 +314,7 @@ def resolve_match_channels(
     """
     Extracts and validates multi-stream channels for a match from the appropriate scraper plugin.
     Returns only verified, working channels sorted by priority:
-    1. OK.ru -> 2. YouTube -> 3. SIR TV / YasirTV -> 4. FHD DRM -> 5. HLS -> 6. Others
+    1. Dynamic P1 Domains (from Sheets) -> 2. Other iFrames -> 3. HLS -> 4. DASH
 
     context (optional): passed from the pipeline; may contain match_name, event_id, blog_post_id, etc.
     """

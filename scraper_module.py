@@ -417,6 +417,15 @@ def _build_match_event(match_data: dict, team_translations: dict, matches_cache:
     existing_link = "" if status_class == "finished" else (cached_match.get("link", "") if cached_match else "")
     channels_payload = patcher.encode_channels_payload(channels) if channels else ""
 
+    prev_cached_channels = cached_match.get("channels", "") if cached_match else ""
+    had_prev_channels = bool(prev_cached_channels and prev_cached_channels != "") or bool(existing_link)
+    if channels:
+        channels_val = channels_payload
+    elif had_prev_channels:
+        channels_val = "--"
+    else:
+        channels_val = ""
+
     plugin_name = match_data.get("plugin", "") or (cached_match.get("plugin", "") if cached_match else "")
     cached_sources = cached_match.get("sources", []) if cached_match else []
     sources = list(dict.fromkeys([p for p in (cached_sources + ([plugin_name] if plugin_name else [])) if p]))
@@ -440,7 +449,8 @@ def _build_match_event(match_data: dict, team_translations: dict, matches_cache:
         "status_class": status_class,
         "match_url": match_url,
         "plugin": plugin_name,
-        "sources": sources
+        "sources": sources,
+        "had_previous_channels": had_prev_channels
     }
 
     cache_entry = {
@@ -454,7 +464,7 @@ def _build_match_event(match_data: dict, team_translations: dict, matches_cache:
             "team1_img": team1_img,
             "team2_img": team2_img,
             "link": existing_link,
-            "channels": channels_payload or (cached_match.get("channels", "") if cached_match else ""),
+            "channels": channels_val,
             "kickoff_time": format_to_human_time(formatted_time),
             "duration": get_match_default_duration_minutes(),
             "status_class": status_class,
@@ -586,6 +596,12 @@ def _process_matches(
                 merged_ch = parsed_matches_map[target_key].get("channels", [])
                 if merged_ch:
                     updated_matches_cache[target_key]["channels"] = patcher.encode_channels_payload(merged_ch)
+                else:
+                    prev_c = matches_cache.get(target_key, {}).get("channels", "") if matches_cache else ""
+                    if prev_c and prev_c != "":
+                        updated_matches_cache[target_key]["channels"] = "--"
+                    else:
+                        updated_matches_cache[target_key]["channels"] = ""
 
     # Multi-source channel preservation:
     # If a match was in cache with channels from a plugin that glitched on this run,

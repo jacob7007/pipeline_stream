@@ -23,7 +23,7 @@ from utils import (
 
 def _get_channels_count(channels_raw) -> int:
     """Extracts channel count from raw list, JSON string, or Base64 payload."""
-    if not channels_raw:
+    if not channels_raw or channels_raw == "--":
         return 0
     if isinstance(channels_raw, list):
         return len(channels_raw)
@@ -254,16 +254,20 @@ def _update_matches_cache_links(scraped_events: list, matches_cache: dict, updat
     scraped_by_event_id = {ev["event_id"]: ev for ev in scraped_events if ev.get("event_id")}
 
     for ev_id, cached_match in matches_cache.items():
+        is_assigned_to_active_slot = ev_id in slot_by_event_id
         if ev_id in scraped_by_event_id:
             ev = scraped_by_event_id[ev_id]
             cached_match["status_class"] = ev.get("status_class", cached_match.get("status_class", "upcoming"))
             if ev.get("channels"):
                 cached_match["channels"] = patcher.encode_channels_payload(ev["channels"])
+            elif is_assigned_to_active_slot or (cached_match.get("channels") and cached_match.get("channels") != ""):
+                cached_match["channels"] = "--"
+            else:
+                cached_match["channels"] = ""
             if ev.get("sources"):
                 cached_match["sources"] = ev["sources"]
 
         permalink_url = ""
-        is_assigned_to_active_slot = ev_id in slot_by_event_id
         if is_assigned_to_active_slot and cached_match.get("status_class") != "finished":
             s = slot_by_event_id[ev_id]
             blog_post_id = s.get("blog_post_id", "")

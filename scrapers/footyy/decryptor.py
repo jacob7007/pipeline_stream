@@ -78,6 +78,18 @@ def _extract_stream_from_decrypted(decrypted: str, target_id: str | None) -> dic
     if m_manifest:
         return _build_stream_result(m_manifest.group(1), decrypted)
 
+    # Case 4: Embedded stream buttons with data-src
+    m_srcs = re.findall(r'data-src\s*=\s*[\'"](https?://[^\'"]+)[\'"]', decrypted)
+    if m_srcs:
+        preferred = next((u for u in m_srcs if any(k in u for k in ("yasirtv", "ok.ru", "sportsonline", "traitaunt", "cuttingfame"))), m_srcs[0])
+        if preferred.endswith(".m3u8") or ".m3u8?" in preferred:
+            return {"type": "hls", "url": preferred}
+        return {
+            "type": "iframe",
+            "url": preferred,
+            "sandbox": "allow-scripts allow-same-origin allow-presentation allow-forms"
+        }
+
     return None
 
 
@@ -101,6 +113,46 @@ def _build_stream_result(raw_url: str, context: str) -> dict | None:
         keys[km.group(1)] = km.group(2)
 
     return {"type": "dash", "manifest": manifest_url, "keys": keys}
+
+
+def decrypt_blogma_payload(text: str) -> str:
+    """Decrypts 2-layer CryptoJS AES __payload ciphertext using __ka, __kb, __ma, __mb from HTML/JS."""
+    m_payload = re.search(r'var\s+__payload\s*=\s*[\"\']([^\"\']+)[\"\'];', text)
+    m_ka = re.search(r'var\s+__ka\s*=\s*(\[[^\]]+\])', text)
+    m_kb = re.search(r'var\s+__kb\s*=\s*(\[[^\]]+\])', text)
+    m_ma = re.search(r'var\s+__ma\s*=\s*([^;]+);', text)
+    m_mb = re.search(r'var\s+__mb\s*=\s*([^;]+);', text)
+
+    if not (m_payload and m_ka and m_kb and m_ma and m_mb):
+        return ""
+
+    try:
+        payload = m_payload.group(1).strip()
+        ka = json.loads(m_ka.group(1))
+        kb = json.loads(m_kb.group(1))
+        ma = json.loads(m_ma.group(1).strip())
+        mb = json.loads(m_mb.group(1).strip())
+
+        def hex_arr_to_str(hex_arr, mask):
+            codes = []
+            for i, h in enumerate(hex_arr):
+                v = int(h, 16)
+                if isinstance(mask, list):
+                    orig = v ^ mask[i % len(mask)]
+                else:
+                    orig = v ^ mask
+                codes.append(orig)
+            return ''.join(chr(c) for c in codes)
+
+        kA = hex_arr_to_str(ka, ma)
+        kB = hex_arr_to_str(kb, mb)
+
+        decB = _cryptojs_aes_decrypt(payload, kB)
+        decA = _cryptojs_aes_decrypt(decB, kA)
+        return decA
+    except Exception as e:
+        logger.warning(f"Plugin (footyy/decryptor): Failed to decrypt AES __payload: {e}")
+        return ""
 
 
 def resolve_blogma_stream(url: str, proxies: dict = None) -> dict | None:
@@ -129,27 +181,9 @@ def resolve_blogma_stream(url: str, proxies: dict = None) -> dict | None:
         if "__payload" not in resp.text:
             return None
 
-        m_payload = re.search(r'var\s+__payload\s*=\s*\"([^\"]+)\"', resp.text)
-        m_ka = re.search(r'var\s+__ka\s*=\s*(\[[^\]]+\])', resp.text)
-        m_kb = re.search(r'var\s+__kb\s*=\s*(\[[^\]]+\])', resp.text)
-        m_ma = re.search(r'var\s+__ma\s*=\s*(\d+)', resp.text)
-        m_mb = re.search(r'var\s+__mb\s*=\s*(\d+)', resp.text)
-
-        if not (m_payload and m_ka and m_kb and m_ma and m_mb):
+        decA = decrypt_blogma_payload(resp.text)
+        if not decA:
             return None
-
-        payload = m_payload.group(1)
-        ka = json.loads(m_ka.group(1))
-        kb = json.loads(m_kb.group(1))
-        ma = int(m_ma.group(1))
-        mb = int(m_mb.group(1))
-
-        # Reconstruct obfuscated passphrases via bitwise XOR with mask integers
-        kA = ''.join([chr(int(x, 16) ^ ma) for x in ka])
-        kB = ''.join([chr(int(x, 16) ^ mb) for x in kb])
-
-        decB = _cryptojs_aes_decrypt(payload, kB)
-        decA = _cryptojs_aes_decrypt(decB, kA)
 
         return _extract_stream_from_decrypted(decA, target_id)
 

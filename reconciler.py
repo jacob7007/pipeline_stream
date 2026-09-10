@@ -87,7 +87,11 @@ def _categorize_sheet_slots(sheet_slots: list, scraped_map: dict, matches_cache:
                 elif _is_slot_shielded(slot, matches_cache, now_dt):
                     slot_label = get_slot_label(slot)
                     display_name = slot.get("event_name") or ev_id
-                    logger.info(f"Reconciler: {slot_label} ('{display_name}') shielded against scraper glitch. Stream preserved.")
+                    cached_channels = matches_cache.get(ev_id, {}).get("channels", "") if matches_cache else ""
+                    if cached_channels == "--":
+                        logger.info(f"Reconciler: {slot_label} ('{display_name}') stream lost (0 channels). Slot preserved with existing channels.")
+                    else:
+                        logger.info(f"Reconciler: {slot_label} ('{display_name}') shielded against scraper glitch. Stream preserved.")
                     active_matched.append(slot)
                 else:
                     to_be_freed.append(slot)

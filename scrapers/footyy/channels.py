@@ -12,21 +12,21 @@ _BLOGMA_URL_PREFIX = {
     "ty":  "https://player.twitch.tv/?channel=",
     "tu":  "https://www.youtube.com/embed/",
     "bn":  "/p/",
-    "b":   "https://merithotdog.net/e/",
-    "bb":  "https://merithotdog.net/e/",
+    "b":   "https://cuttingfame.net/e/",
+    "bb":  "https://cuttingfame.net/e/",
     "n":   "https://nazity.blogspot.com/p/d.html?id=",
     "m":   "https://mazarok.blogspot.com/p/d.html?id=",
     "nn":  "https://nazqma.blogspot.com/p/d.html?id=",
     "mm":  "https://mmzxrt.blogspot.com/p/d.html?id=",
     "i":   "https://iazyew.blogspot.com/p/i.html?src=",
-    "ii":  "https://iakazz.blogspot.com/p/i.html?src=",
-    "o":   "https://kkzawe.blogspot.com/p/ddd.html?id=",
+    "ii":  "https://iakazz.blogspot.com/p/ii.html?src=",
+    "o":   "https://kkzawe.blogspot.com/p/a.html?id=",
     "oo":  "https://mnwzty.blogspot.com/p/ddd.html?id=",
     "sc":  "https://mkaasii.blogspot.com/p/",
-    "sw":  "https://swxzyy.blogspot.com/p/",
+    "sw":  "https://swqwyt.blogspot.com/p/",
     "ov":  "https://azmizaz.blogspot.com/p/",
     "sx":  "https://sxamiya.blogspot.com/p/",
-    "se":  "https://sewzzy.blogspot.com/p/",
+    "se":  "https://senyui.blogspot.com/p/",
 }
 
 # Blogma types that serve as encrypted DRM proxy pages rather than direct iframes
@@ -36,7 +36,30 @@ _BLOGMA_ENCRYPTED_TYPES = {"bx", "b", "bb", "n", "m", "nn", "mm", "o", "oo", "sc
 _BLOGMA_HTML_SUFFIX_TYPES = {"sc", "sw", "ov", "sx", "se"}
 
 
-def _extract_channels_from_script(script_text: str) -> list[dict]:
+def _extract_url_prefixes(page_text: str) -> dict:
+    """Extracts dynamic URL_PREFIX dictionary from Blogma inline scripts, decoding atob() values if present."""
+    prefix_map = dict(_BLOGMA_URL_PREFIX)
+    m = re.search(r'(?:const|var|let)\s+URL_PREFIX\s*=\s*(\{[\s\S]*?\n\s*\});', page_text)
+    if not m:
+        return prefix_map
+    block = m.group(1)
+    import base64
+    for line in block.splitlines():
+        km = re.search(r'([a-zA-Z0-9_-]+)\s*:\s*(?:atob\([\"\']([^\"\']+)[\"\']\)|[\"\']([^\"\']+)[\"\'])', line)
+        if km:
+            key = km.group(1).strip()
+            if km.group(2):
+                try:
+                    val = base64.b64decode(km.group(2)).decode("utf-8").strip()
+                    prefix_map[key] = val
+                except Exception:
+                    pass
+            elif km.group(3):
+                prefix_map[key] = km.group(3).strip()
+    return prefix_map
+
+
+def _extract_channels_from_script(script_text: str, prefix_map: dict = None) -> list[dict]:
     """Extracts the raw channel object array from a FooTyy player page's inline JavaScript.
     Handles standard channels as well as responsive Desktop (DType/DUrl) and Mobile (MType/MUrl) variants."""
     match = re.search(r'channels\s*=\s*(\[.*?\]);', script_text, re.DOTALL)
@@ -63,8 +86,8 @@ def _extract_channels_from_script(script_text: str) -> list[dict]:
             m_url = entry.get("MUrl", "")
 
             # If both Desktop and Mobile are specified and point to different stream targets, extract both!
-            d_full = _build_full_url(d_type, d_url)
-            m_full = _build_full_url(m_type, m_url)
+            d_full = _build_full_url(d_type, d_url, prefix_map=prefix_map)
+            m_full = _build_full_url(m_type, m_url, prefix_map=prefix_map)
 
             if d_url and m_url and d_full != m_full:
                 base_name = entry.get("name", f"Live {entry.get('id', '')}").strip()
@@ -88,10 +111,11 @@ def _extract_channels_from_script(script_text: str) -> list[dict]:
     return channel_list
 
 
-def _build_full_url(c_type: str, c_url: str) -> str:
+def _build_full_url(c_type: str, c_url: str, prefix_map: dict = None) -> str:
     """Expands a shorthand Blogma channel URL using the prefix map and adds .html when required."""
-    if c_type in _BLOGMA_URL_PREFIX and not c_url.startswith(("http://", "https://")):
-        full = _BLOGMA_URL_PREFIX[c_type] + c_url
+    prefixes = prefix_map or _BLOGMA_URL_PREFIX
+    if c_type in prefixes and not c_url.startswith(("http://", "https://")):
+        full = prefixes[c_type] + c_url
         if c_type in _BLOGMA_HTML_SUFFIX_TYPES and not full.endswith(".html"):
             full += ".html"
         return full
@@ -104,7 +128,7 @@ def _is_blogma_helper(c_type: str, full_url: str) -> bool:
     embeds. Only treat a URL as Blogma if it actually points to a Blogma/blogspot helper page or
     uses a type code with a known Blogma prefix mapping (non-bx)."""
     # Types that ALWAYS map to Blogma helper pages (they have prefix entries or are blogspot proxies)
-    if c_type in _BLOGMA_ENCRYPTED_TYPES and c_type != "bx":
+    if c_type in _BLOGMA_ENCRYPTED_TYPES and c_type not in ("bx", "b", "bb"):
         return True
     # URL-based detection for bx or any other type
     if "blogspot.com/p/" in full_url or "blogma" in full_url:
@@ -208,7 +232,7 @@ def _try_resolve_embed_to_hls(url: str, proxies: dict = None) -> str | None:
     return None
 
 
-def _format_channel_entry(entry: dict, idx: int, proxies: dict = None) -> dict | None:
+def _format_channel_entry(entry: dict, idx: int, proxies: dict = None, prefix_map: dict = None) -> dict | None:
     """
     Converts one raw JS channel dict into a standardised player channel dict.
     Returns None if the entry cannot be resolved to a usable stream.
@@ -222,13 +246,13 @@ def _format_channel_entry(entry: dict, idx: int, proxies: dict = None) -> dict |
 
     c_id = int(entry.get("id", idx))
     c_name = entry.get("name", f"Live {c_id}")
-    full_url = unwrap_redirector_url(_build_full_url(c_type, c_url))
+    full_url = unwrap_redirector_url(_build_full_url(c_type, c_url, prefix_map=prefix_map))
 
     # Blogma helper pages need server-side AES decryption to get the real stream
     if _is_blogma_helper(c_type, full_url) and full_url.startswith(("http://", "https://")):
         drm_stream = resolve_blogma_stream(full_url, proxies=proxies)
         if drm_stream:
-            quality_label = "DASH" if drm_stream.get("type") == "dash" else "HLS"
+            quality_label = "DASH" if drm_stream.get("type") == "dash" else ("HLS" if drm_stream.get("type") == "hls" else "iFrame")
             return {"id": c_id, "name": c_name, "quality": quality_label, **drm_stream}
         # If decryption failed on a blogspot helper proxy, do not treat dead proxy as valid iframe
         if "blogspot.com" in full_url:
@@ -287,12 +311,30 @@ def extract_channels(match_url: str, proxies: dict = None) -> list[dict]:
         if resp.status_code != 200:
             return []
 
-        soup = BeautifulSoup(resp.text, "html.parser")
+        text = resp.text
+        prefix_map = _extract_url_prefixes(text)
+
+        # 1. Plaintext channels in scripts
+        soup = BeautifulSoup(text, "html.parser")
         for script in soup.find_all("script"):
             if script.string and ("var channels" in script.string or "channels =" in script.string):
-                raw_channels = _extract_channels_from_script(script.string)
+                raw_channels = _extract_channels_from_script(script.string, prefix_map=prefix_map)
                 formatted = [
-                    _format_channel_entry(ch, idx, proxies=proxies)
+                    _format_channel_entry(ch, idx, proxies=proxies, prefix_map=prefix_map)
+                    for idx, ch in enumerate(raw_channels, start=1)
+                ]
+                result = [ch for ch in formatted if ch is not None]
+                if result:
+                    return result
+
+        # 2. Encrypted __payload (high-profile matches like Real Madrid on en.blogma.sbs)
+        if "__payload" in text and "__ka" in text:
+            from .decryptor import decrypt_blogma_payload
+            decrypted_html = decrypt_blogma_payload(text)
+            if decrypted_html and ("channels" in decrypted_html):
+                raw_channels = _extract_channels_from_script(decrypted_html, prefix_map=prefix_map)
+                formatted = [
+                    _format_channel_entry(ch, idx, proxies=proxies, prefix_map=prefix_map)
                     for idx, ch in enumerate(raw_channels, start=1)
                 ]
                 result = [ch for ch in formatted if ch is not None]

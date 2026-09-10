@@ -417,7 +417,7 @@ def load_domain_cache(client: gspread.Client, spreadsheet_name: str = "Streaming
         worksheet = sh.worksheet(_DOMAIN_CACHE_SHEET)
     except gspread.exceptions.WorksheetNotFound:
         worksheet = sh.add_worksheet(title=_DOMAIN_CACHE_SHEET, rows="500", cols="7")
-        worksheet.append_row(["domain", "status", "", "p1_domain", "p1_quality", "", "sandbox_errors"])
+        worksheet.append_row(["domain", "status", "", "p1_domain", "p1_quality", "p1_sandbox", "", "sandbox_errors"])
         logger.info(f"Sheets: Created '{_DOMAIN_CACHE_SHEET}' worksheet with headers.")
 
     all_values = worksheet.get_all_values()
@@ -431,6 +431,7 @@ def load_domain_cache(client: gspread.Client, spreadsheet_name: str = "Streaming
     stat_idx = header_map.get("status", 1)
     p1_dom_idx = header_map.get("p1_domain")
     p1_qual_idx = header_map.get("p1_quality")
+    p1_sandbox_idx = header_map.get("p1_sandbox")
     err_idx = header_map.get("sandbox_errors")
 
     domain_cache = {}
@@ -449,13 +450,15 @@ def load_domain_cache(client: gspread.Client, spreadsheet_name: str = "Streaming
                 "status": status_val or "--",
             }
 
-        # 2. Dynamic P1 rules (Columns D & E: p1_domain, p1_quality)
+        # 2. Dynamic P1 rules (Columns D, E, F: p1_domain, p1_quality, p1_sandbox)
         if p1_dom_idx is not None and p1_dom_idx < len(padded):
             raw_p1 = padded[p1_dom_idx].strip().lower()
             if raw_p1:
                 p1_domain = domain_from_sheet_format(raw_p1)
                 p1_quality = padded[p1_qual_idx].strip() if p1_qual_idx is not None and p1_qual_idx < len(padded) else ""
-                p1_rules.append((p1_domain, p1_quality))
+                raw_sandbox = padded[p1_sandbox_idx].strip().upper() if p1_sandbox_idx is not None and p1_sandbox_idx < len(padded) else "--"
+                p1_sandbox = (raw_sandbox == "YES")
+                p1_rules.append((p1_domain, p1_quality, p1_sandbox))
 
         # 3. Dynamic sandbox error phrases (Column: sandbox_errors)
         if err_idx is not None and err_idx < len(padded):
@@ -469,14 +472,14 @@ def load_domain_cache(client: gspread.Client, spreadsheet_name: str = "Streaming
 
 def save_domain_cache(client: gspread.Client, cache: dict, spreadsheet_name: str = "Streaming Dashboard") -> None:
     """Updates only the domain status columns (A and B) in '_cache_domains'.
-    Strictly preserves all other columns (p1_domain, p1_quality, sandbox_errors).
+    Strictly preserves all other columns (p1_domain, p1_quality, p1_sandbox, sandbox_errors).
     """
     sh = open_spreadsheet(client, spreadsheet_name)
     try:
         worksheet = sh.worksheet(_DOMAIN_CACHE_SHEET)
     except gspread.exceptions.WorksheetNotFound:
-        worksheet = sh.add_worksheet(title=_DOMAIN_CACHE_SHEET, rows="500", cols="7")
-        worksheet.append_row(["domain", "status", "", "p1_domain", "p1_quality", "", "sandbox_errors"])
+        worksheet = sh.add_worksheet(title=_DOMAIN_CACHE_SHEET, rows="500", cols="8")
+        worksheet.append_row(["domain", "status", "", "p1_domain", "p1_quality", "p1_sandbox", "", "sandbox_errors"])
 
     rows = []
     for domain in sorted(cache.keys()):

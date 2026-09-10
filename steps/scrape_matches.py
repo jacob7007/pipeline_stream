@@ -26,16 +26,20 @@ def _display_scraped_events(scraped_events: list):
         t2 = ev['team2'].get('nameEn') or ev['team2']['nameAr']
         status = ev.get('status_class', 'upcoming').upper()
         ch_count = len(ev.get('channels', []))
+        had_prev = ev.get('had_previous_channels', False) or bool(ev.get('link'))
         if ch_count:
             stream_part = f"{ch_count} live channel{'s' if ch_count != 1 else ''}"
+        elif had_prev:
+            stream_part = f"{logger.COLOR_DARK_GRAY}(0 channels){logger.COLOR_RESET}"
         else:
             stream_part = f"{logger.COLOR_DARK_GRAY}(No stream){logger.COLOR_RESET}"
 
         aligned_teams = f"{t1:<{max_t1_len}} - {t2:<{max_t2_len}}"
-        if status == "LIVE" and ch_count:
-            status_styled = f"{logger.COLOR_GREEN}{logger.COLOR_BOLD}{status:<{max_status_len}}{logger.COLOR_RESET}"
-        elif status == "LIVE" and not ch_count:
-            status_styled = f"{logger.COLOR_YELLOW}SOON    {logger.COLOR_RESET}"
+        if status == "LIVE":
+            if ch_count or had_prev:
+                status_styled = f"{logger.COLOR_GREEN}{logger.COLOR_BOLD}{status:<{max_status_len}}{logger.COLOR_RESET}"
+            else:
+                status_styled = f"{logger.COLOR_YELLOW}SOON    {logger.COLOR_RESET}"
         elif status == "UPCOMING":
             status_styled = f"{logger.COLOR_YELLOW}{status:<{max_status_len}}{logger.COLOR_RESET}"
         elif status == "FINISHED":
