@@ -2,10 +2,12 @@ import translation_manager
 import sheets_module
 import scraper_module
 import logger
+from datetime import datetime
 from utils import (
     format_to_human_time,
     get_status_priority,
     get_match_lookahead_hours,
+    parse_iso_time,
     PipelineAbortError,
 )
 
@@ -109,15 +111,17 @@ def run(
         logger.item("Scraper: 0 matches currently scheduled on competitor websites.")
         return [], team_translations, updated_matches_cache or matches_cache
 
-    scraped_events.sort(
-        key=lambda ev: (
-            -get_status_priority(
-                ev.get("status_class", "upcoming"),
-                has_stream=bool(ev.get("channels") or ev.get("link"))
-            ),
-            ev["time"]
+    def _scraped_sort_key(ev):
+        prio = get_status_priority(
+            ev.get("status_class", "upcoming"),
+            has_stream=bool(ev.get("channels") or ev.get("link"))
         )
-    )
+        dt = parse_iso_time(ev.get("time", ""))
+        t_val = dt.timestamp() if dt != datetime.min else 0.0
+        time_key = -t_val if (prio == 0 or ev.get("status_class") == "finished") else t_val
+        return (-prio, time_key)
+
+    scraped_events.sort(key=_scraped_sort_key)
     lookahead_h = get_match_lookahead_hours()
     hours_str = f"{int(lookahead_h)}h" if lookahead_h.is_integer() else f"{lookahead_h}h"
     print()

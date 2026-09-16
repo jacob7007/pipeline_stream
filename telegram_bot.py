@@ -11,7 +11,9 @@ from utils import (
     get_blog_id,
     get_blog_player_id,
     get_spreadsheet_name,
-    format_to_human_time
+    format_to_human_time,
+    get_status_priority,
+    parse_iso_time
 )
 
 load_env()
@@ -168,6 +170,18 @@ def _handle_match_command(chat_id: int, bot_token: str, spreadsheet_name: str, b
     scraped_events, _, _, _ = scraper_module.scrape_live_matches(
         team_translations=team_translations, matches_cache=matches_cache, slots=slots
     )
+
+    def _telegram_sort_key(ev):
+        prio = get_status_priority(
+            ev.get("status_class", "upcoming"),
+            has_stream=bool(ev.get("channels") or ev.get("link"))
+        )
+        dt = parse_iso_time(ev.get("time", ""))
+        t_val = dt.timestamp() if dt != datetime.min else 0.0
+        time_key = -t_val if (prio == 0 or ev.get("status_class") == "finished") else t_val
+        return (-prio, time_key)
+
+    scraped_events.sort(key=_telegram_sort_key)
 
     try:
         posts_map = blogger_module.fetch_posts_map(clients["blogger"], blog_id, status="live,draft")

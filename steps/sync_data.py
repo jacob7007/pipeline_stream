@@ -130,15 +130,17 @@ def assemble_matches_feed(matches_cache: dict) -> list[dict]:
         if not is_dup:
             deduped_feed.append(item)
 
-    deduped_feed.sort(
-        key=lambda m: (
-            -get_status_priority(
-                m["_status_class"],
-                has_stream=bool(m.get("link") and str(m.get("link")).strip())
-            ),
-            m["time"]
+    def _feed_sort_key(m):
+        prio = get_status_priority(
+            m["_status_class"],
+            has_stream=bool(m.get("link") and str(m.get("link")).strip())
         )
-    )
+        dt = parse_iso_time(m.get("time", ""))
+        t_val = dt.timestamp() if dt != datetime.min else 0.0
+        time_key = -t_val if (prio == 0 or m.get("ended")) else t_val
+        return (-prio, time_key)
+
+    deduped_feed.sort(key=_feed_sort_key)
     for idx, item in enumerate(deduped_feed, start=1):
         item["id"] = idx
 

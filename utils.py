@@ -402,12 +402,14 @@ def is_match_starting_soon(
 
 def get_status_priority(status: str, has_stream: bool = True) -> int:
     """Returns numeric priority for match status. Higher value = higher priority.
-    Matches marked 'live' only receive top priority if they actually have an active stream / channel / link.
-    Live matches without streams ('soon') are deprioritized below live streaming matches.
+    3: Live matches with an active stream / channel / link.
+    2: Live matches without streams ('soon').
+    1: Upcoming matches before kickoff.
+    0: Finished matches.
     """
     s = (status or "").strip().lower()
     if s == "live":
-        return 2 if has_stream else 1
+        return 3 if has_stream else 2
     if s == "upcoming":
         return 1
     return 0
