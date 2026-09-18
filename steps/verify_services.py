@@ -1,6 +1,6 @@
 import sheets_module
-import blogger_module
 import logger
+import cloudflare_module
 from utils import PipelineAbortError
 
 
@@ -17,59 +17,32 @@ def _verify_sheets_status(sheets_client, spreadsheet_name: str):
     logger.success("Dashboard sheets is active and accessible.")
 
 
-def _verify_single_blog(blogger_session, label: str, target_name: str, blog_id: str):
-    """Verifies single Blogger blog status."""
-    print()
-    logger.info(f"Checking {label}...")
-    is_ok, err_msg = blogger_module.check_blog_status(blogger_session, blog_id)
+def _verify_cloudflare_api(cloudflare_api_url: str):
+    """Verifies that the Cloudflare Worker API is active and accessible via probe GET /matches and GET /channels."""
+    if not cloudflare_api_url:
+        logger.error("Cloudflare: CLOUDFLARE_API_URL is missing or empty.")
+        raise PipelineAbortError(
+            "MISSING CONFIG : CLOUDFLARE API",
+            "CLOUDFLARE_API_URL environment variable is not configured."
+        )
 
+    logger.info("Checking Cloudflare API endpoints /matches, /channels...")
+    is_ok, err_msg = cloudflare_module.check_api_status(cloudflare_api_url)
     if not is_ok:
-        logger.error(f"{label.capitalize()} is suspended or not available: {err_msg}")
+        logger.error(f"Cloudflare API health check failed: {err_msg}")
         raise PipelineAbortError(
-            f"INACCESSIBLE : {target_name}",
-            f"{label.capitalize()} ({blog_id}) is suspended or not available: {err_msg}"
+            "INACCESSIBLE : CLOUDFLARE API",
+            f"Failed to connect to Cloudflare Worker API: {err_msg}"
         )
-
-    logger.success(f"{label.capitalize()} is active and accessible.")
-
-
-def _verify_data_page(blogger_session, blog_data_id: str, data_page_id: str):
-    """Verifies that the Blogger data page is accessible."""
-    print()
-    logger.info("Checking the data page...")
-    page_ok, page_err = blogger_module.check_page_status(blogger_session, blog_data_id, data_page_id)
-    if not page_ok:
-        logger.error(f"The data page is suspended or not available: {page_err}")
-        raise PipelineAbortError(
-            "INACCESSIBLE : DATA PAGE",
-            f"The data page ({data_page_id}) is not accessible: {page_err}"
-        )
-    logger.success("The data page is active and accessible.")
+    logger.success("Cloudflare API endpoints are active and accessible.")
 
 
-def run(
-    sheets_client,
-    blogger_session,
-    spreadsheet_name: str,
-    blog_id: str,
-    blog_player_id: str,
-    blog_data_id: str,
-    data_page_id: str
-):
+def run(sheets_client, spreadsheet_name: str, cloudflare_api_url: str):
     """
-    Step 1: Verifies that Google Sheets dashboard and all Blogger websites are active and accessible.
+    Step 1: Verifies that Google Sheets dashboard and Cloudflare API are active and accessible.
     Raises PipelineAbortError if any check fails.
     """
     _verify_sheets_status(sheets_client, spreadsheet_name)
+    print()
+    _verify_cloudflare_api(cloudflare_api_url)
 
-    blogs_to_check = [
-        ("the blog website", "BLOG WEBSITE", blog_id),
-        ("the data website", "DATA WEBSITE", blog_data_id),
-    ]
-    if blog_player_id and blog_player_id != blog_id:
-        blogs_to_check.insert(1, ("the player website", "PLAYER WEBSITE", blog_player_id))
-
-    for label, target_name, b_id in blogs_to_check:
-        _verify_single_blog(blogger_session, label, target_name, b_id)
-
-    _verify_data_page(blogger_session, blog_data_id, data_page_id)

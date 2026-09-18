@@ -8,6 +8,8 @@ from utils import (
     get_status_priority,
     get_match_lookahead_hours,
     parse_iso_time,
+    get_now_local,
+    is_match_starting_soon,
     PipelineAbortError,
 )
 
@@ -22,33 +24,33 @@ def _display_scraped_events(scraped_events: list):
 
     max_date_len = max((len(format_to_human_time(ev['time'])) for ev in scraped_events), default=14)
     max_status_len = 8
+    now_dt = get_now_local()
 
     for idx, ev in enumerate(scraped_events, 1):
         t1 = ev['team1'].get('nameEn') or ev['team1']['nameAr']
         t2 = ev['team2'].get('nameEn') or ev['team2']['nameAr']
         status = ev.get('status_class', 'upcoming').upper()
         ch_count = len(ev.get('channels', []))
-        had_prev = ev.get('had_previous_channels', False) or bool(ev.get('link'))
-        if ch_count:
-            stream_part = f"{ch_count} live channel{'s' if ch_count != 1 else ''}"
-        elif had_prev:
-            stream_part = f"{logger.COLOR_DARK_GRAY}(0 channels){logger.COLOR_RESET}"
-        else:
-            stream_part = f"{logger.COLOR_DARK_GRAY}(No stream){logger.COLOR_RESET}"
+        is_soon = is_match_starting_soon(ev.get('time', ''), now_dt, status_class=ev.get('status_class', ''))
+        ch_label = f"{ch_count} Channel" if ch_count <= 1 else f"{ch_count} Channels"
 
-        aligned_teams = f"{t1:<{max_t1_len}} - {t2:<{max_t2_len}}"
-        if status == "LIVE":
-            if ch_count or had_prev:
+        if status == "FINISHED":
+            status_styled = f"{logger.COLOR_DARK_GRAY}{status:<{max_status_len}}{logger.COLOR_RESET}"
+            stream_part = f"{logger.COLOR_DARK_GRAY}{ch_label}{logger.COLOR_RESET}"
+        elif status == "LIVE":
+            if ch_count > 0:
                 status_styled = f"{logger.COLOR_GREEN}{logger.COLOR_BOLD}{status:<{max_status_len}}{logger.COLOR_RESET}"
             else:
                 status_styled = f"{logger.COLOR_YELLOW}SOON    {logger.COLOR_RESET}"
-        elif status == "UPCOMING":
+            stream_part = f"{logger.COLOR_GREEN}{logger.COLOR_BOLD}{ch_label}{logger.COLOR_RESET}"
+        elif is_soon:
             status_styled = f"{logger.COLOR_YELLOW}{status:<{max_status_len}}{logger.COLOR_RESET}"
-        elif status == "FINISHED":
-            status_styled = f"{logger.COLOR_DARK_GRAY}{status:<{max_status_len}}{logger.COLOR_RESET}"
+            stream_part = f"{logger.COLOR_GREEN}{logger.COLOR_BOLD}{ch_label}{logger.COLOR_RESET}"
         else:
-            status_styled = f"{status:<{max_status_len}}"
+            status_styled = f"{logger.COLOR_YELLOW}{status:<{max_status_len}}{logger.COLOR_RESET}"
+            stream_part = f"{logger.COLOR_DARK_GRAY}{ch_label}{logger.COLOR_RESET}"
 
+        aligned_teams = f"{t1:<{max_t1_len}} - {t2:<{max_t2_len}}"
         kickoff_str = format_to_human_time(ev['time'])
         aligned_date = f"{kickoff_str:<{max_date_len}}"
         print(f"  [{idx:2d}] {aligned_teams}  |  {aligned_date}  |  {status_styled}  |  {stream_part}")
@@ -76,11 +78,10 @@ def _persist_scraper_translations(sheets_client, spreadsheet_name: str, new_tran
 
 def run(
     sheets_client,
-    spreadsheet_name: str,
-    slots: list = None
+    spreadsheet_name: str
 ) -> tuple[list, dict, dict]:
     """
-    Step 4: Scrapes live matches from competitors, renders display preview, and persists translations.
+    Step 2: Scrapes live matches from competitors, renders display preview, and persists translations.
     Returns (scraped_events, team_translations, updated_matches_cache).
     """
     team_translations = translation_manager.load_team_translations(sheets_client, spreadsheet_name)
@@ -90,7 +91,6 @@ def run(
         scraped_events, new_translations, updated_matches_cache, alias_updates = scraper_module.scrape_live_matches(
             team_translations=team_translations,
             matches_cache=matches_cache,
-            slots=slots,
             sheets_client=sheets_client,
             spreadsheet_name=spreadsheet_name,
         )

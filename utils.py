@@ -442,77 +442,24 @@ def get_telegram_bot_token() -> str:
     """Returns the Telegram Bot API token from TELEGRAM_BOT_TOKEN env var."""
     return os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 
-def get_blog_id() -> str:
-    """Returns the Blogger ID for the public website (Tivivi Edu) from BLOG_ID env var."""
-    return os.environ.get("BLOG_ID", "").strip()
+def get_cloudflare_api_url() -> str:
+    """Returns the Cloudflare Worker API URL from CLOUDFLARE_API_URL env var."""
+    return os.environ.get("CLOUDFLARE_API_URL", "").strip()
 
-def get_blog_player_id() -> str:
-    """Returns the Blogger ID for the Multi-Channel Player blog from BLOG_PLAYER_ID env var."""
-    return os.environ.get("BLOG_PLAYER_ID", "").strip()
 
-def get_blog_data_id() -> str:
-    """Returns the Blogger ID for the data website from BLOG_DATA_ID env var."""
-    return os.environ.get("BLOG_DATA_ID", "").strip()
+def get_cloudflare_sync_token() -> str:
+    """Returns the Cloudflare sync secret bearer token from CLOUDFLARE_SYNC_TOKEN env var."""
+    return os.environ.get("CLOUDFLARE_SYNC_TOKEN", "").strip()
 
-def get_data_page_id() -> str:
-    """Returns the Blogger page ID for matches data from DATA_PAGE_ID env var."""
-    return os.environ.get("DATA_PAGE_ID", "").strip()
 
-DEFAULT_PLAYER_THEME = "?background=ffffff&theme=light&primary=1a73e8"
+def get_player_base_url() -> str:
+    """Returns the base player URL for streaming links from PLAYER_BASE_URL env var."""
+    return os.environ.get("PLAYER_BASE_URL", "https://tivivi-pla.blogspot.com/p/live.html").strip()
 
-def get_player_theme() -> str:
-    """Returns the player theme query string from PLAYER_THEME env var, or DEFAULT_PLAYER_THEME if unset/empty."""
-    theme = os.environ.get("PLAYER_THEME", "").strip()
-    return theme if theme else DEFAULT_PLAYER_THEME
-
-def build_player_iframe_url(player_url: str) -> str:
-    """Appends the player theme query parameters to the player post URL before embedding it in the public blog.
-    Ensures theme queries are always included (defaulting to DEFAULT_PLAYER_THEME).
-    """
-    if not player_url or not player_url.strip():
-        return ""
-    player_url = player_url.strip()
-    theme = get_player_theme().strip()
-    if not theme:
-        theme = DEFAULT_PLAYER_THEME
-
-    query = theme.lstrip("?").lstrip("&")
-    if not query:
-        return player_url
-
-    # Avoid duplicating if already present
-    if query in player_url:
-        return player_url
-
-    if player_url.endswith("?") or player_url.endswith("&"):
-        return f"{player_url}{query}"
-    sep = "&" if "?" in player_url else "?"
-    return f"{player_url}{sep}{query}"
 
 def get_spreadsheet_name() -> str:
     """Returns the Google Sheets spreadsheet name/ID from SPREADSHEET_NAME env var."""
     return os.environ.get("SPREADSHEET_NAME", "Streaming Dashboard").strip()
-
-def get_slot_label(slot: dict) -> str:
-    """Returns a standardized human-readable label for a slot row (e.g. 'Slot #01')."""
-    if not slot:
-        return "unknown slot"
-    raw_slot = slot.get('slot') or slot.get('blog') or ""
-    if raw_slot:
-        raw_str = str(raw_slot).strip()
-        if raw_str.startswith("#"):
-            return f"Slot {raw_str}"
-        if raw_str.lower().startswith("slot"):
-            clean = raw_str.replace("Slot", "").replace("slot", "").strip()
-            return f"Slot {clean}" if clean.startswith("#") else f"Slot #{clean}"
-        return f"Slot #{raw_str}"
-    if slot.get('row_num') is not None:
-        return f"Slot (Row {slot['row_num']})"
-    return "unknown slot"
-
-def get_blog_label(blog: dict) -> str:
-    """Returns a standardized label for a slot (alias for get_slot_label)."""
-    return get_slot_label(blog)
 
 def get_event_display_name(event: dict) -> str:
     """Returns 'Team1En vs Team2En' display name for an event."""

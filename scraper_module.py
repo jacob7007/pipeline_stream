@@ -72,30 +72,28 @@ def get_request_proxies() -> dict:
 
 
 def generate_stable_event_id(t1_name_en: str, t2_name_en: str, kickoff_iso: str) -> str:
-    # Use name slugs instead of 3-letter codes — codes are not globally unique for clubs
-    # (e.g. both Levante UD and Bayer Leverkusen share "LEV"), which caused cache collisions.
+    # Use name slugs with full date DD-MM-YYYY format for globally unique stable event slugs
     s1 = slugify_team_name(t1_name_en)
     s2 = slugify_team_name(t2_name_en)
-    match = re.search(r'(\d{2})\d{2}-(\d{2})-(\d{2})', kickoff_iso)
+    match = re.search(r'(\d{4})-(\d{2})-(\d{2})', str(kickoff_iso or ""))
     if match:
-        yy, mm, dd = match.group(1), match.group(2), match.group(3)
-        date_part = f"{yy}-{mm}-{dd}"
+        yyyy, mm, dd = match.group(1), match.group(2), match.group(3)
+        date_part = f"{dd}-{mm}-{yyyy}"
     else:
-        date_part = "00-00-00"
+        date_part = "00-00-0000"
     return f"{s1}-vs-{s2}-{date_part}"
 
 
 
-def migrate_matches_cache_translations(matches_cache: dict, team_translations: dict, slots: list = None) -> dict:
+def migrate_matches_cache_translations(matches_cache: dict, team_translations: dict) -> dict:
     """
     Re-evaluates cached match entries against the latest team translations.
     Updates event IDs, team names, and logo URLs if teams were previously Unknown or had placeholder codes.
-    Merges duplicate entries and updates assigned slot event IDs in-place.
+    Merges duplicate entries in-place.
     """
     if not matches_cache or not team_translations:
         return matches_cache
 
-    slots = slots or []
     migrated_count = 0
 
     for old_event_id, cached_match in list(matches_cache.items()):
@@ -141,13 +139,17 @@ def migrate_matches_cache_translations(matches_cache: dict, team_translations: d
                 kickoff_iso = ""
 
         if not kickoff_iso:
-            date_match = re.search(r'(\d{2})-(\d{2})-(\d{2})$', old_event_id)
+            date_match = re.search(r'(\d{2})-(\d{2})-(\d{4})$', old_event_id)
             if date_match:
-                yy, mm, dd = date_match.groups()
-                kickoff_iso = f"20{yy}-{mm}-{dd}"
+                dd, mm, yyyy = date_match.groups()
+                kickoff_iso = f"{yyyy}-{mm}-{dd}"
+            else:
+                legacy_match = re.search(r'(\d{2})-(\d{2})-(\d{2})$', old_event_id)
+                if legacy_match:
+                    yy, mm, dd = legacy_match.groups()
+                    kickoff_iso = f"20{yy}-{mm}-{dd}"
 
         new_event_id = generate_stable_event_id(t1_en, t2_en, kickoff_iso)
-
 
         name_changed = (t1_en != cached_match.get("team1_en")) or (t2_en != cached_match.get("team2_en"))
         id_changed = (new_event_id != old_event_id)
@@ -181,14 +183,6 @@ def migrate_matches_cache_translations(matches_cache: dict, team_translations: d
                 matches_cache[new_event_id] = cached_match
                 del matches_cache[old_event_id]
                 logger.info(f"Translation: Migrated match cache ID '{old_event_id}' -> '{new_event_id}' ({new_event_name})")
-
-            # Update matching slot references so stream slots don't get displaced
-            for slot in slots:
-                if slot.get("event_id") == old_event_id:
-                    slot["event_id"] = new_event_id
-                    slot["event_name"] = new_event_name
-                    slot_name = slot.get("slot") or f"#{slot.get('row_num', '')}"
-                    logger.info(f"Slots: Updated slot {slot_name} event ID to '{new_event_id}'")
 
             migrated_count += 1
         else:
@@ -414,17 +408,19 @@ def _build_match_event(match_data: dict, team_translations: dict, matches_cache:
     else:
         team2_img = match_data.get("team2_orig_img", "").strip() or PLACEHOLDER_IMAGE_URL
 
-    existing_link = "" if status_class == "finished" else (cached_match.get("link", "") if cached_match else "")
+    existing_link = cached_match.get("link", "") if cached_match else ""
     channels_payload = patcher.encode_channels_payload(channels) if channels else ""
 
     prev_cached_channels = cached_match.get("channels", "") if cached_match else ""
-    had_prev_channels = bool(prev_cached_channels and prev_cached_channels != "") or bool(existing_link)
     if channels:
         channels_val = channels_payload
-    elif had_prev_channels:
-        channels_val = "--"
+        effective_channels = channels
+    elif prev_cached_channels and patcher.is_valid_base64_payload(prev_cached_channels):
+        channels_val = prev_cached_channels
+        effective_channels = patcher.decode_channels_payload(prev_cached_channels)
     else:
         channels_val = ""
+        effective_channels = []
 
     plugin_name = match_data.get("plugin", "") or (cached_match.get("plugin", "") if cached_match else "")
     cached_sources = cached_match.get("sources", []) if cached_match else []
@@ -444,13 +440,12 @@ def _build_match_event(match_data: dict, team_translations: dict, matches_cache:
         },
         "time": formatted_time,
         "duration": get_match_default_duration_minutes(),
-        "channels": channels,
+        "channels": effective_channels,
         "link": existing_link,
         "status_class": status_class,
         "match_url": match_url,
         "plugin": plugin_name,
         "sources": sources,
-        "had_previous_channels": had_prev_channels
     }
 
     cache_entry = {
@@ -527,7 +522,6 @@ def _process_matches(
     matches_cache: dict,
     now_dt: datetime,
     proxies: dict,
-    slots: list = None,
     plugin_health: dict = None
 ) -> tuple:
     parsed_matches_map = {}
@@ -598,8 +592,9 @@ def _process_matches(
                     updated_matches_cache[target_key]["channels"] = patcher.encode_channels_payload(merged_ch)
                 else:
                     prev_c = matches_cache.get(target_key, {}).get("channels", "") if matches_cache else ""
-                    if prev_c and prev_c != "":
-                        updated_matches_cache[target_key]["channels"] = "--"
+                    if prev_c and patcher.is_valid_base64_payload(prev_c):
+                        updated_matches_cache[target_key]["channels"] = prev_c
+                        parsed_matches_map[target_key]["channels"] = patcher.decode_channels_payload(prev_c)
                     else:
                         updated_matches_cache[target_key]["channels"] = ""
 
@@ -685,11 +680,7 @@ def _process_matches(
 
                 # Prune unbroadcasted matches that disappeared from all competitor scrapers past kickoff with no active stream
                 has_active_link = bool(cached_entry.get("link") and str(cached_entry.get("link")).strip())
-                is_slot_active = any(
-                    s.get("event_id") == ev_id and s.get("status", "").strip().lower() in ["valid", "active"]
-                    for s in (slots or [])
-                ) if slots else has_active_link
-                has_active_stream = has_active_link and is_slot_active
+                has_active_stream = has_active_link
 
                 dt_kickoff = parse_user_styled_time(k_time)
                 if not has_active_stream and dt_kickoff != datetime.min and cached_entry.get("status_class") != "finished":
@@ -708,10 +699,9 @@ def _process_matches(
                 if is_plugin_glitched:
                     retained_entry["source_glitched"] = True
 
-                # If match duration has passed or it was marked finished, ensure it stays finished and link is cleared
+                # If match duration has passed or it was marked finished, ensure it stays finished
                 if retained_entry.get("status_class") == "finished" or is_match_ended(k_time, duration, now_dt):
                     retained_entry["status_class"] = "finished"
-                    retained_entry["link"] = ""
 
                 updated_matches_cache[ev_id] = retained_entry
 
@@ -721,7 +711,6 @@ def _process_matches(
 def scrape_live_matches(
     team_translations: dict = None,
     matches_cache: dict = None,
-    slots: list = None,
     sheets_client=None,
     spreadsheet_name: str = None,
 ) -> tuple:
@@ -770,15 +759,15 @@ def scrape_live_matches(
                     if team.get("row_num") and team.get("sheet_name"):
                         alias_updates.append((team["row_num"], team["sheet_name"], 5, img))
 
-    # Re-evaluate cached matches & slots with updated translations and purge duplicate IDs
-    migrate_matches_cache_translations(matches_cache, team_translations, slots)
+    # Re-evaluate cached matches with updated translations and purge duplicate IDs
+    migrate_matches_cache_translations(matches_cache, team_translations)
 
     logger.success("Translation: Translation completed.")
     print()
 
     now_dt = get_now_local()
     parsed_matches, updated_matches_cache = _process_matches(
-        matches_to_process, team_translations, matches_cache, now_dt, get_request_proxies(), slots=slots, plugin_health=plugin_health
+        matches_to_process, team_translations, matches_cache, now_dt, get_request_proxies(), plugin_health=plugin_health
     )
 
     return parsed_matches, new_translations_list, updated_matches_cache, alias_updates

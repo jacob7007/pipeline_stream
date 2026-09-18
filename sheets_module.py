@@ -11,19 +11,6 @@ SCOPES = [
     "https://www.googleapis.com/auth/drive"
 ]
 
-SLOT_COLUMNS = [
-    "slot",
-    "channel_post_id",
-    "blog_post_id",
-    "event_id",
-    "event_name",
-    "status",
-    "kickoff_time",
-    "last_updated"
-]
-
-COLUMNS = SLOT_COLUMNS
-
 MATCHES_CACHE_COLUMNS = [
     "event_id",
     "team1_en",
@@ -91,89 +78,6 @@ def get_gspread_client() -> gspread.Client:
     )
 
 
-def _get_slots_worksheet(sh, preferred_name: str = None):
-    """Finds the slots worksheet (_cache_slots or first sheet)."""
-    target = preferred_name if preferred_name else "_cache_slots"
-    try:
-        return sh.worksheet(target), target
-    except gspread.exceptions.WorksheetNotFound:
-        return sh.sheet1, sh.sheet1.title
-
-
-def fetch_all_slots(client: gspread.Client, spreadsheet_name: str = "Streaming Dashboard", worksheet_name: str = None) -> list:
-    """Fetches all slot rows from the slots worksheet."""
-    sh = open_spreadsheet(client, spreadsheet_name)
-    worksheet, _ = _get_slots_worksheet(sh, worksheet_name)
-
-    all_values = worksheet.get_all_values()
-    if not all_values:
-        return []
-
-    headers = [h.strip() for h in all_values[0]]
-    rows = all_values[1:]
-
-    slots = []
-    for idx, row in enumerate(rows, start=2):
-        padded_row = row + [""] * (len(headers) - len(row))
-        row_dict = {"row_num": idx}
-        for h_idx, header in enumerate(headers):
-            key = header.strip().lower()
-            val = padded_row[h_idx].strip()
-            row_dict[key] = val
-            if key in ["blog", "slot"]:
-                row_dict["slot"] = val
-            elif key in ["post_id", "blog_post_id", "blog_id"]:
-                row_dict["blog_post_id"] = val
-            elif key in ["channel_post_id", "channel_id", "player_post_id"]:
-                row_dict["channel_post_id"] = val
-        slots.append(row_dict)
-
-    return slots
-
-
-def _build_slot_update_range(slot: dict, headers: list, header_indices: dict, now_local_str: str) -> dict | None:
-    """Constructs a single row update payload for a changed slot."""
-    row_num = slot.get("row_num")
-    if not row_num:
-        return None
-
-    slot["last_updated"] = now_local_str
-    row_data = [""] * len(headers)
-    for key, value in slot.items():
-        if key == "row_num":
-            continue
-        key_norm = key.lower()
-        if key_norm in header_indices:
-            row_data[header_indices[key_norm] - 1] = str(value)
-
-    range_name = f"A{row_num}:{gspread.utils.rowcol_to_a1(row_num, len(headers))}"
-    return {"range": range_name, "values": [row_data]}
-
-
-def update_changed_slots(client: gspread.Client, changed_slots: list, spreadsheet_name: str = "Streaming Dashboard", worksheet_name: str = None):
-    """Updates the Google Sheet for rows that have changed in the slots worksheet."""
-    if not changed_slots:
-        return
-
-    sh = open_spreadsheet(client, spreadsheet_name)
-    worksheet, target_sheet_name = _get_slots_worksheet(sh, worksheet_name)
-
-    headers = [h.strip() for h in worksheet.row_values(1)]
-    header_indices = {header.lower(): idx for idx, header in enumerate(headers, start=1)}
-    now_local = get_now_local()
-    now_local_str = format_to_human_time(now_local.replace(tzinfo=resolve_timezone(None)).isoformat())
-
-    body = []
-    for slot in changed_slots:
-        entry = _build_slot_update_range(slot, headers, header_indices, now_local_str)
-        if entry:
-            body.append(entry)
-
-    if body:
-        worksheet.batch_update(body)
-        count = len(body)
-        logger.success(f"Updated {count} slot{'s' if count != 1 else ''} on Google Sheets.")
-
 
 def fetch_matches_cache(client, spreadsheet_name: str = "Streaming Dashboard") -> dict:
     """Fetches matches cache from '_cache_matches' worksheet, supporting 13-column and legacy schemas."""
@@ -211,6 +115,8 @@ def fetch_matches_cache(client, spreadsheet_name: str = "Streaming Dashboard") -
         team2_img = padded_row[header_map["team2_img"]].strip() if "team2_img" in header_map else ""
         link = padded_row[header_map["link"]].strip() if "link" in header_map else ""
         channels = padded_row[header_map["channels"]].strip() if "channels" in header_map else ""
+        if channels == "--":
+            channels = ""
         k_time = padded_row[header_map["kickoff_time"]].strip() if "kickoff_time" in header_map else ""
 
         duration_raw = padded_row[header_map["duration"]].strip() if "duration" in header_map else "180"
@@ -300,6 +206,9 @@ def _filter_valid_cache_rows(matches_cache: dict, now: datetime, now_local_str: 
             sources_list = [data["plugin"]]
         sources_str = ", ".join(sources_list)
 
+        ch_val = data.get("channels", "")
+        ch_clean = "" if ch_val == "--" else ch_val
+
         row = [
             data.get("event_id", event_id),
             data.get("team1_en", ""),
@@ -307,7 +216,7 @@ def _filter_valid_cache_rows(matches_cache: dict, now: datetime, now_local_str: 
             data.get("team1_ar", ""),
             data.get("team2_ar", ""),
             data.get("link", ""),
-            data.get("channels", ""),
+            ch_clean,
             format_to_human_time(str(data.get("kickoff_time", ""))),
             duration,
             status_class,
@@ -376,7 +285,7 @@ def save_matches_cache(client, matches_cache: dict, spreadsheet_name: str = "Str
             ]
             if existing_rows_data == new_rows_data:
                 skip_msg = f"{logger.COLOR_DARK_GRAY}Skipping update.{logger.COLOR_RESET}"
-                logger.success(f"Matches list is already up to date in the dashboard. {skip_msg}")
+                logger.success(f"Sheets: Dashboard is already up to date. {skip_msg}")
                 return True
     except Exception as e:
         logger.warning(f"Sheets: Could not compare cache differences: {e}")
@@ -492,3 +401,4 @@ def save_domain_cache(client: gspread.Client, cache: dict, spreadsheet_name: str
         range_label = f"A2:B{len(rows) + 1}"
         worksheet.update(range_label, rows)
     logger.success(f"Sheets: Saved {len(rows)} domain entries to '{_DOMAIN_CACHE_SHEET}'.")
+

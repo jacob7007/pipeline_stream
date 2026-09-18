@@ -1,5 +1,3 @@
-import json
-from pathlib import Path
 import re
 import difflib
 import unicodedata
@@ -136,24 +134,7 @@ _CONFLICTING_MODIFIER_PAIRS: set[frozenset] = {
 }
 
 # Well-known short names / acronyms → canonical normalized English name.
-# Resource path resolution
-_RESOURCES_DIR = Path(__file__).resolve().parent / "resources"
-_SYNONYMS_FILE = _RESOURCES_DIR / "canonical_synonyms.json"
-
-
-def _load_canonical_synonyms() -> dict[str, str | None]:
-    """Loads external canonical team synonyms dictionary from JSON resource."""
-    if _SYNONYMS_FILE.exists():
-        try:
-            with open(_SYNONYMS_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            pass
-    return {}
-
-
-# Well-known short names / acronyms → canonical normalized English name.
-_CANONICAL_SYNONYMS: dict[str, str | None] = _load_canonical_synonyms()
+_CANONICAL_SYNONYMS: dict[str, str | None] = {}
 
 
 def set_canonical_synonyms(synonyms: dict[str, str]):
