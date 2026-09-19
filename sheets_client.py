@@ -285,7 +285,7 @@ def save_matches_cache(client, matches_cache: dict, spreadsheet_name: str = "Str
             ]
             if existing_rows_data == new_rows_data:
                 skip_msg = f"{logger.COLOR_DARK_GRAY}Skipping update.{logger.COLOR_RESET}"
-                logger.success(f"Sheets: Dashboard is already up to date. {skip_msg}")
+                logger.info(f"Sheets: Dashboard is already up to date. {skip_msg}")
                 return True
     except Exception as e:
         logger.warning(f"Sheets: Could not compare cache differences: {e}")

@@ -70,7 +70,7 @@ def sync_matches(
     # Smart Diff: If remote state is identical to new feed, skip network write
     if _remote_matches_data is not None and _remote_matches_data == clean_matches:
         skip_msg = f"{logger.COLOR_DARK_GRAY}Skipping update.{logger.COLOR_RESET}"
-        logger.success(f"Cloudflare: Matches feed is already up to date. {skip_msg}")
+        logger.info(f"Cloudflare: Matches feed is already up to date. {skip_msg}")
         return True
 
     payload = {"matches": clean_matches}
@@ -117,7 +117,7 @@ def sync_channels(
     # Smart Diff: If remote channels state is identical to new map, skip network write
     if _remote_channels_data is not None and _remote_channels_data == channels_map:
         skip_msg = f"{logger.COLOR_DARK_GRAY}Skipping update.{logger.COLOR_RESET}"
-        logger.success(f"Cloudflare: Channels feed is already up to date. {skip_msg}")
+        logger.info(f"Cloudflare: Channels feed is already up to date. {skip_msg}")
         return True
 
     payload = {"channels": channels_map}

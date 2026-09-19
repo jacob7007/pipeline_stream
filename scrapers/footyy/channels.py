@@ -141,7 +141,7 @@ def _try_resolve_embed_to_hls(url: str, proxies: dict = None) -> str | None:
     if not url or not url.startswith(("http://", "https://")):
         return None
 
-    from iframe_validator import unwrap_redirector_url
+    from channels_engine import unwrap_redirector_url
     clean_url = unwrap_redirector_url(url)
 
     try:
@@ -237,7 +237,7 @@ def _format_channel_entry(entry: dict, idx: int, proxies: dict = None, prefix_ma
     Converts one raw JS channel dict into a standardised player channel dict.
     Returns None if the entry cannot be resolved to a usable stream.
     """
-    from iframe_validator import unwrap_redirector_url
+    from channels_engine import unwrap_redirector_url
 
     c_type = entry.get("type", "").strip().lower()
     c_url = entry.get("url", "").strip()
@@ -300,7 +300,7 @@ def _format_channel_entry(entry: dict, idx: int, proxies: dict = None, prefix_ma
 def extract_channels(match_url: str, proxies: dict = None) -> list[dict]:
     """
     Fetches a FooTyy match page, extracts the channels JS array, formats every entry,
-    and returns all resolved channel dicts. Validation and priority sorting happen in channel_resolver.
+    and returns all resolved channel dicts. Validation and priority sorting happen in channels_engine.
     """
     if not match_url or not match_url.startswith(("http://", "https://")) or "#match-" in match_url:
         return []

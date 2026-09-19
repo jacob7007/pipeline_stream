@@ -28,8 +28,8 @@ from utils import (
 )
 
 from translation_manager import find_existing_translation, resolve_missing_teams
-import channel_resolver
-from channel_resolver import resolve_match_channels
+import channels_engine
+from channels_engine import resolve_match_channels
 import patcher
 from scrapers import SCRAPER_PLUGINS, ScraperPluginError
 from normalization import (
@@ -505,7 +505,7 @@ def _merge_channel_lists(channels_a: list, channels_b: list) -> list:
         merged.append(dict(ch))
 
     merged.sort(key=lambda c: (
-        channel_resolver.get_channel_priority(c),
+        channels_engine.get_channel_priority(c),
         int(c.get("id", 999)) if str(c.get("id", "")).isdigit() else 999
     ))
 
@@ -729,7 +729,7 @@ def scrape_live_matches(
 
     print()
     if sheets_client:
-        channel_resolver.init_domain_cache(sheets_client, spreadsheet_name or "Streaming Dashboard")
+        channels_engine.init_domain_cache(sheets_client, spreadsheet_name or "Streaming Dashboard")
     logger.success(f"Sheets: Loaded {len(team_translations)} team translations from cache.")
     print()
 
@@ -763,7 +763,8 @@ def scrape_live_matches(
     migrate_matches_cache_translations(matches_cache, team_translations)
 
     logger.success("Translation: Translation completed.")
-    print()
+
+    logger.step_header("3/4", "Resolving Streams")
 
     now_dt = get_now_local()
     parsed_matches, updated_matches_cache = _process_matches(

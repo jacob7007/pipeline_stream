@@ -452,9 +452,9 @@ def get_cloudflare_sync_token() -> str:
     return os.environ.get("CLOUDFLARE_SYNC_TOKEN", "").strip()
 
 
-def get_player_base_url() -> str:
-    """Returns the base player URL for streaming links from PLAYER_BASE_URL env var."""
-    return os.environ.get("PLAYER_BASE_URL", "https://tivivi-pla.blogspot.com/p/live.html").strip()
+def get_default_player_url() -> str:
+    """Returns the default player URL for Telegram & internal channel previews from DEFAULT_PLAYER_URL env var."""
+    return os.environ.get("DEFAULT_PLAYER_URL", "https://tivivi-pla.blogspot.com").strip()
 
 
 def get_spreadsheet_name() -> str:

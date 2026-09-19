@@ -1,7 +1,9 @@
+import os
+import re
+import urllib.parse
 import requests
 import logger
-import sheets_module
-import iframe_validator
+import sheets_client
 from scrapers import SCRAPER_PLUGINS
 from utils import DEFAULT_HEADERS, format_to_human_time, get_now_local, resolve_timezone
 
@@ -14,24 +16,43 @@ for p in SCRAPER_PLUGINS:
     PLUGIN_REGISTRY[p.__name__.split(".")[-1]] = p
 
 # ---------------------------------------------------------------------------
-# ---------------------------------------------------------------------------
 # Module-level state — initialised by init_domain_cache() at pipeline start.
 # ---------------------------------------------------------------------------
-_domain_cache: dict = {}       # {domain: {"status": "OK"|"NO"|"--"}}
-_p1_rules: list = []           # [(domain, quality_badge), ...] (loaded dynamically from Google Sheets)
+_domain_cache: dict = {}            # {domain: {"status": "OK"|"NO"|"--"}}
+_p1_rules: list = []                # [(domain, quality_badge), ...] (loaded dynamically from Google Sheets)
 _domain_cache_dirty: bool = False   # True when any new probe result was written this run
-_pending_alerts: list = []     # "--" results waiting for end-of-run Telegram dispatch
+_pending_alerts: list = []          # "--" results waiting for end-of-run Telegram dispatch
+_DYNAMIC_SANDBOX_ERRORS: list[str] = []
+
+# Timeouts in milliseconds for Playwright probing (configurable via env vars).
+_DEFAULT_TIMEOUT_MS = int(os.environ.get("PROBE_TIMEOUT_MS", 14_000))
+_SETTLE_MS = int(os.environ.get("PROBE_SETTLE_MS", 4_000))
+
+
+# ---------------------------------------------------------------------------
+# Dynamic Sandbox Error Phrases Configuration
+# ---------------------------------------------------------------------------
+
+def set_sandbox_errors(errors: list[str]) -> None:
+    """Updates the dynamic sandbox error phrases loaded from Google Sheets."""
+    global _DYNAMIC_SANDBOX_ERRORS
+    _DYNAMIC_SANDBOX_ERRORS = [phrase.strip().lower() for phrase in errors if phrase and phrase.strip()]
+
+
+def get_sandbox_errors() -> list[str]:
+    """Returns the current list of dynamic sandbox error phrases."""
+    return list(_DYNAMIC_SANDBOX_ERRORS)
 
 
 # ---------------------------------------------------------------------------
 # Domain cache lifecycle — called from run_pipeline.py
 # ---------------------------------------------------------------------------
 
-def init_domain_cache(sheets_client, spreadsheet_name: str) -> None:
+def init_domain_cache(client, spreadsheet_name: str) -> None:
     """Loads the _cache_domains sheet into memory at the start of the pipeline run."""
     global _domain_cache, _p1_rules, _domain_cache_dirty, _pending_alerts
-    _domain_cache, _p1_rules, sandbox_errors = sheets_module.load_domain_cache(sheets_client, spreadsheet_name)
-    iframe_validator.set_sandbox_errors(sandbox_errors)
+    _domain_cache, _p1_rules, sandbox_errors = sheets_client.load_domain_cache(client, spreadsheet_name)
+    set_sandbox_errors(sandbox_errors)
     _domain_cache_dirty = False
     _pending_alerts = []
 
@@ -42,12 +63,12 @@ def set_p1_rules(rules: list) -> None:
     _p1_rules = list(rules)
 
 
-def flush_domain_cache(sheets_client, spreadsheet_name: str) -> None:
+def flush_domain_cache(client, spreadsheet_name: str) -> None:
     """Writes the in-memory domain cache back to Sheets — only if a probe ran this run."""
     global _domain_cache_dirty
     if not _domain_cache_dirty:
         return
-    sheets_module.save_domain_cache(sheets_client, _domain_cache, spreadsheet_name)
+    sheets_client.save_domain_cache(client, _domain_cache, spreadsheet_name)
     _domain_cache_dirty = False
 
 
@@ -57,8 +78,18 @@ def get_pending_alerts() -> list:
 
 
 # ---------------------------------------------------------------------------
-# Domain extraction
+# URL and Domain Extraction / Unwrapping Utilities
 # ---------------------------------------------------------------------------
+
+def unwrap_redirector_url(url: str) -> str:
+    """Strips redirector wrappers (e.g. href.li, anonym.to, dereferer.me)."""
+    if not url:
+        return ""
+    m = re.match(r"^https?://(?:www\.)?(?:href\.li|anonym\.to|dereferer\.me)/\?(https?://.+)$", url, re.IGNORECASE)
+    if m:
+        return m.group(1).strip()
+    return url
+
 
 def _extract_domain(url: str) -> str:
     """Extracts the registered domain from a URL using tldextract, with urllib fallback."""
@@ -111,12 +142,162 @@ def _is_blocked_by_headers(headers: dict) -> bool:
 def _is_blocked_by_content(response_text: str) -> bool:
     """Returns True if the response body signals an anti-embed or domain block."""
     sample = (response_text or "")[:4096].lower()
-    errors = iframe_validator.get_sandbox_errors()
+    errors = get_sandbox_errors()
     return any(phrase in sample for phrase in errors)
 
 
 # ---------------------------------------------------------------------------
-# Main validation entry point
+# Browser-based Sandbox Iframe Probing (Playwright)
+# ---------------------------------------------------------------------------
+
+def _build_probe_html(url: str) -> str:
+    """Returns a minimal HTML page embedding the candidate URL in a sandboxed iframe."""
+    escaped = url.replace('"', "%22")
+    return (
+        "<!DOCTYPE html><html><head>"
+        "<meta charset='utf-8'>"
+        "<style>*{margin:0;padding:0}body,html{width:100%;height:100%}</style>"
+        "</head><body>"
+        f'<iframe id="probe" '
+        f'sandbox="allow-scripts allow-same-origin allow-presentation allow-forms" '
+        f'src="{escaped}" '
+        f'allow="autoplay; fullscreen; picture-in-picture; encrypted-media" '
+        f'style="width:100%;height:100vh;border:0">'
+        f'</iframe>'
+        "</body></html>"
+    )
+
+
+def _check_frames_for_errors(page) -> str | None:
+    """
+    Iterates all frames on the page and checks rendered text and content for
+    dynamic sandbox error phrases loaded from Google Sheets.
+    Returns the matched error phrase string if found, otherwise None.
+    """
+    if not _DYNAMIC_SANDBOX_ERRORS:
+        return None
+
+    for frame in page.frames:
+        try:
+            text = (frame.inner_text("body", timeout=500) or "").lower()
+            for phrase in _DYNAMIC_SANDBOX_ERRORS:
+                if phrase in text:
+                    return phrase
+        except Exception:
+            pass
+        try:
+            content = (frame.content() or "").lower()
+            for phrase in _DYNAMIC_SANDBOX_ERRORS:
+                if phrase in content:
+                    return phrase
+        except Exception:
+            pass
+    return None
+
+
+def probe_url(url: str, timeout_ms: int = None) -> dict:
+    """
+    Tests whether a candidate iframe URL works inside a sandboxed iframe.
+
+    Returns:
+        {"status": "NO", "error_phrase": "..."}  -> If blocked by sandbox / HTTP error / error phrase.
+        {"status": "--", "error_phrase": None}   -> If rendered without sandbox errors.
+    """
+    if timeout_ms is None:
+        timeout_ms = _DEFAULT_TIMEOUT_MS
+
+    clean_url = unwrap_redirector_url(url)
+    if "games.ok.ru/videoembed" in clean_url and "autoplay=0" in clean_url:
+        clean_url = clean_url.replace("autoplay=0", "autoplay=1")
+
+    # Fast HTTP reachability & error pre-check (~200ms)
+    try:
+        r_pre = requests.get(clean_url, headers={**DEFAULT_HEADERS, "Referer": "https://footyy.footyy.com/"}, timeout=8)
+        if r_pre.status_code in (404, 410, 500, 502, 503):
+            return {"status": "NO", "error_phrase": f"HTTP {r_pre.status_code}"}
+        sample_text = r_pre.text[:2048].lower()
+        for phrase in _DYNAMIC_SANDBOX_ERRORS:
+            if phrase in sample_text:
+                return {"status": "NO", "error_phrase": phrase}
+    except Exception:
+        pass
+
+    # Lazy import Playwright
+    try:
+        from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
+    except ImportError:
+        logger.error("channels_engine: Playwright is not installed. Run: playwright install chromium")
+        return {"status": "--", "error_phrase": None}
+
+    http_error_code = None
+
+    try:
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(
+                headless=True,
+                args=[
+                    "--disable-web-security",       # allows reading cross-origin frame DOM
+                    "--no-sandbox",                 # required on Linux CI runners
+                    "--disable-setuid-sandbox",
+                    "--disable-dev-shm-usage",      # avoids /dev/shm space issues on CI
+                    "--autoplay-policy=no-user-gesture-required",
+                ],
+            )
+            context = browser.new_context(
+                viewport={"width": 1280, "height": 720},
+                user_agent=(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/126.0.0.0 Safari/537.36"
+                ),
+            )
+            page = context.new_page()
+
+            def on_response(response):
+                nonlocal http_error_code
+                if response.url == clean_url and response.status >= 400:
+                    http_error_code = response.status
+
+            page.on("response", on_response)
+
+            # Build the probe page as a data URI
+            probe_html = _build_probe_html(clean_url)
+            data_uri = "data:text/html;charset=utf-8," + urllib.parse.quote(probe_html)
+
+            try:
+                page.goto(data_uri, timeout=timeout_ms, wait_until="domcontentloaded")
+            except PlaywrightTimeout:
+                browser.close()
+                return {"status": "--", "error_phrase": "page load timeout"}
+
+            # Allow settle time for delayed sandbox-detection scripts to fire
+            try:
+                page.wait_for_timeout(_SETTLE_MS)
+            except Exception:
+                pass
+
+            # 1. Main frame HTTP status error check
+            if http_error_code:
+                browser.close()
+                return {"status": "NO", "error_phrase": f"HTTP {http_error_code}"}
+
+            # 2. Sandbox rejection or error phrase in rendered DOM
+            matched_phrase = _check_frames_for_errors(page)
+            if matched_phrase:
+                browser.close()
+                return {"status": "NO", "error_phrase": matched_phrase}
+
+            # 3. Not blocked by sandbox -> Unverified candidate (ready for manual review)
+            browser.close()
+            return {"status": "--", "error_phrase": None}
+
+    except Exception as ex:
+        logger.warning(f"channels_engine: Unhandled probe error for {url}: {ex}")
+        return {"status": "--", "error_phrase": None}
+
+
+# ---------------------------------------------------------------------------
+# Main Stream Playability Check
 # ---------------------------------------------------------------------------
 
 def is_stream_playable(ch: dict, proxies: dict = None, match_context: dict = None) -> bool:
@@ -184,7 +365,7 @@ def is_stream_playable(ch: dict, proxies: dict = None, match_context: dict = Non
         if not raw_url or not raw_url.startswith(("http://", "https://")):
             return False
 
-        url = iframe_validator.unwrap_redirector_url(raw_url)
+        url = unwrap_redirector_url(raw_url)
         ch["url"] = url
 
         # --- Step 1: HTTP reachability + header check + content block check (fast, ~100ms) ---
@@ -221,7 +402,7 @@ def is_stream_playable(ch: dict, proxies: dict = None, match_context: dict = Non
         print()
         logger.info(f"Scraper: '{domain}'{match_suffix}")
 
-        result = iframe_validator.probe_url(url)
+        result = probe_url(url)
         probe_status = result.get("status", "--")
         error_phrase = result.get("error_phrase", "")
 

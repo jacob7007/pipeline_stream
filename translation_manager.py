@@ -4,7 +4,7 @@ import json
 import requests
 import gspread
 import logger
-from sheets_module import open_spreadsheet
+from sheets_client import open_spreadsheet
 from utils import sanitize_sheet_image_url, PLACEHOLDER_IMAGE_URL
 from normalization import (
     are_arabic_names_equivalent,
@@ -404,7 +404,7 @@ def resolve_missing_teams(missing_team_names: list, team_translations: dict, mat
 
     if not missing_team_names:
         skip_msg = f"{logger.COLOR_DARK_GRAY}Skipping OpenRouter.{logger.COLOR_RESET}"
-        logger.success(f"Translation: All teams found in translation cache. {skip_msg}")
+        logger.info(f"Translation: All teams found in translation cache. {skip_msg}")
         return new_translations_list, alias_updates
 
     logger.info(f"Translation: Sending {len(missing_team_names)} new/untranslated teams to OpenRouter...")
