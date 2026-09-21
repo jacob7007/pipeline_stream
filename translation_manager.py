@@ -5,7 +5,7 @@ import requests
 import gspread
 import logger
 from sheets_client import open_spreadsheet
-from utils import sanitize_sheet_image_url, PLACEHOLDER_IMAGE_URL
+from utils import sanitize_sheet_image_url, PLACEHOLDER_IMAGE_URL, get_spreadsheet_name
 from normalization import (
     are_arabic_names_equivalent,
     are_english_teams_equivalent,
@@ -90,11 +90,12 @@ def _parse_translation_sheet(sh, sheet_name: str, type_label: str, translations:
         }
 
 
-def load_team_translations(client, spreadsheet_name: str = "Streaming Dashboard") -> dict:
+def load_team_translations(client, spreadsheet_name: str = None) -> dict:
     """
     Fetches the team translations from '_cache_national_teams' and '_cache_clubs' worksheets.
     Registers dynamic canonical synonyms from the sheet.
     """
+    spreadsheet_name = (spreadsheet_name or get_spreadsheet_name()).strip()
     sh = open_spreadsheet(client, spreadsheet_name)
     translations = {}
     dynamic_synonyms = {}
@@ -159,11 +160,12 @@ def find_existing_translation(name: str, team_translations: dict) -> dict:
     return best_candidate
 
 
-def update_team_aliases(client, alias_updates: list, spreadsheet_name: str = "Streaming Dashboard"):
+def update_team_aliases(client, alias_updates: list, spreadsheet_name: str = None):
     """Appends new aliases to Column A or backfills missing fields on existing rows in Google Sheets using a single batch update."""
     if not alias_updates:
         return
 
+    spreadsheet_name = (spreadsheet_name or get_spreadsheet_name()).strip()
     sh = open_spreadsheet(client, spreadsheet_name)
     by_sheet = {}
     for update in alias_updates:
@@ -194,11 +196,12 @@ def update_team_aliases(client, alias_updates: list, spreadsheet_name: str = "St
                 logger.error(f"Sheets: Failed batch updating '{sheet_name}': {e}")
 
 
-def save_new_team_translations_separated(client, new_translations: list, spreadsheet_name: str = "Streaming Dashboard"):
+def save_new_team_translations_separated(client, new_translations: list, spreadsheet_name: str = None):
     """Appends new 5-column translation rows to either '_cache_national_teams' or '_cache_clubs' worksheet."""
     if not new_translations:
         return
 
+    spreadsheet_name = (spreadsheet_name or get_spreadsheet_name()).strip()
     sh = open_spreadsheet(client, spreadsheet_name)
     # national: [arabic_aliases, primary_arabic_name, primary_english_name, code, logo_url]
     national_rows = [["", t[0], t[1], t[2], sanitize_sheet_image_url(t[3])] for t in new_translations if t[4] == "national"]

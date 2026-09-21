@@ -5,7 +5,7 @@ import requests
 import logger
 import sheets_client
 from scrapers import SCRAPER_PLUGINS
-from utils import DEFAULT_HEADERS, format_to_human_time, get_now_local, resolve_timezone
+from utils import DEFAULT_HEADERS, format_to_human_time, get_now_local, resolve_timezone, get_spreadsheet_name
 
 # Build normalized plugin registry supporting PLUGIN_NAME and module name
 PLUGIN_REGISTRY = {}
@@ -48,9 +48,10 @@ def get_sandbox_errors() -> list[str]:
 # Domain cache lifecycle — called from run_pipeline.py
 # ---------------------------------------------------------------------------
 
-def init_domain_cache(client, spreadsheet_name: str) -> None:
+def init_domain_cache(client, spreadsheet_name: str = None) -> None:
     """Loads the _cache_domains sheet into memory at the start of the pipeline run."""
     global _domain_cache, _p1_rules, _domain_cache_dirty, _pending_alerts
+    spreadsheet_name = (spreadsheet_name or get_spreadsheet_name()).strip()
     _domain_cache, _p1_rules, sandbox_errors = sheets_client.load_domain_cache(client, spreadsheet_name)
     set_sandbox_errors(sandbox_errors)
     _domain_cache_dirty = False
@@ -63,11 +64,12 @@ def set_p1_rules(rules: list) -> None:
     _p1_rules = list(rules)
 
 
-def flush_domain_cache(client, spreadsheet_name: str) -> None:
+def flush_domain_cache(client, spreadsheet_name: str = None) -> None:
     """Writes the in-memory domain cache back to Sheets — only if a probe ran this run."""
     global _domain_cache_dirty
     if not _domain_cache_dirty:
         return
+    spreadsheet_name = (spreadsheet_name or get_spreadsheet_name()).strip()
     sheets_client.save_domain_cache(client, _domain_cache, spreadsheet_name)
     _domain_cache_dirty = False
 

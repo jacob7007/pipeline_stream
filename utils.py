@@ -92,6 +92,8 @@ def load_env():
                     if key and key not in os.environ:
                         os.environ[key] = val
 
+load_env()
+
 def send_telegram_message(bot_token, chat_id, text):
     """Send a message via the Telegram Bot API. Returns True on success, False on failure."""
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
@@ -459,7 +461,13 @@ def get_default_player_url() -> str:
 
 def get_spreadsheet_name() -> str:
     """Returns the Google Sheets spreadsheet name/ID from SPREADSHEET_NAME env var."""
-    return os.environ.get("SPREADSHEET_NAME", "Streaming Dashboard").strip()
+    val = os.environ.get("SPREADSHEET_NAME", "").strip()
+    if not val:
+        raise ValueError(
+            "Missing required environment variable 'SPREADSHEET_NAME'. "
+            "Please ensure SPREADSHEET_NAME is defined in your .env file or GitHub Secrets."
+        )
+    return val
 
 def get_event_display_name(event: dict) -> str:
     """Returns 'Team1En vs Team2En' display name for an event."""

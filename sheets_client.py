@@ -4,7 +4,14 @@ from datetime import datetime, timedelta
 import gspread
 from google.oauth2.service_account import Credentials
 import logger
-from utils import format_to_human_time, parse_user_styled_time, get_now_local, resolve_timezone, is_match_expired
+from utils import (
+    format_to_human_time,
+    parse_user_styled_time,
+    get_now_local,
+    resolve_timezone,
+    is_match_expired,
+    get_spreadsheet_name,
+)
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
@@ -29,8 +36,9 @@ MATCHES_CACHE_COLUMNS = [
 ]
 
 
-def open_spreadsheet(client, spreadsheet_name: str):
+def open_spreadsheet(client, spreadsheet_name: str = None):
     """Opens a spreadsheet by name, falling back to opening by key/ID."""
+    spreadsheet_name = (spreadsheet_name or get_spreadsheet_name()).strip()
     try:
         return client.open(spreadsheet_name)
     except gspread.exceptions.SpreadsheetNotFound:
@@ -40,12 +48,13 @@ def open_spreadsheet(client, spreadsheet_name: str):
             raise ValueError(f"Spreadsheet '{spreadsheet_name}' not found by name or ID.")
 
 
-def check_sheets_status(client: gspread.Client, spreadsheet_name: str) -> tuple[bool, str]:
+def check_sheets_status(client: gspread.Client, spreadsheet_name: str = None) -> tuple[bool, str]:
     """
     Verifies that the Google Sheets spreadsheet exists and is accessible.
     Returns a tuple (is_accessible, error_message).
     """
     try:
+        spreadsheet_name = (spreadsheet_name or get_spreadsheet_name()).strip()
         sh = open_spreadsheet(client, spreadsheet_name)
         _ = sh.title
         return True, ""
@@ -79,8 +88,9 @@ def get_gspread_client() -> gspread.Client:
 
 
 
-def fetch_matches_cache(client, spreadsheet_name: str = "Streaming Dashboard") -> dict:
+def fetch_matches_cache(client, spreadsheet_name: str = None) -> dict:
     """Fetches matches cache from '_cache_matches' worksheet, supporting 13-column and legacy schemas."""
+    spreadsheet_name = (spreadsheet_name or get_spreadsheet_name()).strip()
     sh = open_spreadsheet(client, spreadsheet_name)
     sheet_name = "_cache_matches"
     try:
@@ -230,8 +240,9 @@ def _filter_valid_cache_rows(matches_cache: dict, now: datetime, now_local_str: 
     return valid_cache_rows
 
 
-def save_matches_cache(client, matches_cache: dict, spreadsheet_name: str = "Streaming Dashboard") -> bool:
+def save_matches_cache(client, matches_cache: dict, spreadsheet_name: str = None) -> bool:
     """Clears and updates the '_cache_matches' worksheet with current cache entries if changed."""
+    spreadsheet_name = (spreadsheet_name or get_spreadsheet_name()).strip()
     sh = open_spreadsheet(client, spreadsheet_name)
     sheet_name = "_cache_matches"
     try:
@@ -311,7 +322,7 @@ def domain_from_sheet_format(raw_domain: str) -> str:
     return raw_domain.strip().lower().replace("_", ".")
 
 
-def load_domain_cache(client: gspread.Client, spreadsheet_name: str = "Streaming Dashboard") -> tuple[dict, list[tuple[str, str]], list[str]]:
+def load_domain_cache(client: gspread.Client, spreadsheet_name: str = None) -> tuple[dict, list[tuple[str, str]], list[str]]:
     """Loads domain validation cache, dynamic P1 rules, and dynamic sandbox error phrases
     from the '_cache_domains' worksheet in a single Google Sheets API call.
 
@@ -321,6 +332,7 @@ def load_domain_cache(client: gspread.Client, spreadsheet_name: str = "Streaming
         - p1_rules: [(domain, quality_label), ...] preserving exact order in sheets
         - sandbox_errors: [error_phrase_1, error_phrase_2, ...] (100% dynamic from sheet)
     """
+    spreadsheet_name = (spreadsheet_name or get_spreadsheet_name()).strip()
     sh = open_spreadsheet(client, spreadsheet_name)
     try:
         worksheet = sh.worksheet(_DOMAIN_CACHE_SHEET)
@@ -379,10 +391,11 @@ def load_domain_cache(client: gspread.Client, spreadsheet_name: str = "Streaming
     return domain_cache, p1_rules, sandbox_errors
 
 
-def save_domain_cache(client: gspread.Client, cache: dict, spreadsheet_name: str = "Streaming Dashboard") -> None:
+def save_domain_cache(client: gspread.Client, cache: dict, spreadsheet_name: str = None) -> None:
     """Updates only the domain status columns (A and B) in '_cache_domains'.
     Strictly preserves all other columns (p1_domain, p1_quality, p1_sandbox, sandbox_errors).
     """
+    spreadsheet_name = (spreadsheet_name or get_spreadsheet_name()).strip()
     sh = open_spreadsheet(client, spreadsheet_name)
     try:
         worksheet = sh.worksheet(_DOMAIN_CACHE_SHEET)
