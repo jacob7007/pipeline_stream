@@ -26,6 +26,7 @@ from utils import (
     PLACEHOLDER_IMAGE_URL,
     sanitize_sheet_image_url,
     get_spreadsheet_name,
+    get_match_player_url,
 )
 
 from translation_manager import find_existing_translation, resolve_missing_teams
@@ -409,7 +410,7 @@ def _build_match_event(match_data: dict, team_translations: dict, matches_cache:
     else:
         team2_img = match_data.get("team2_orig_img", "").strip() or PLACEHOLDER_IMAGE_URL
 
-    existing_link = cached_match.get("link", "") if cached_match else ""
+    existing_link = get_match_player_url(event_id)
     channels_payload = patcher.encode_channels_payload(channels) if channels else ""
 
     prev_cached_channels = cached_match.get("channels", "") if cached_match else ""

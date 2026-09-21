@@ -10,7 +10,8 @@ from utils import (
     get_allowed_chat_ids,
     get_telegram_bot_token,
     get_spreadsheet_name,
-    get_default_player_url,
+    get_cloudflare_api_url,
+    get_match_player_url,
     format_to_human_time,
     get_status_priority,
     parse_iso_time
@@ -23,7 +24,7 @@ import scraper_engine
 import translation_manager
 import logger
 import patcher
-from run_pipeline import run_sync
+from run_pipeline import run_sync, assemble_matches_feed, assemble_channels_map
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -113,7 +114,7 @@ def _handle_end_command(arg: str, chat_id: int, bot_token: str, spreadsheet_name
             "team2_ar": t2_ar,
             "team1_img": found_match['team1'].get('img', ''),
             "team2_img": found_match['team2'].get('img', ''),
-            "link": found_match.get("link", ""),
+            "link": get_match_player_url(event_id),
             "channels": ch_payload,
             "kickoff_time": kickoff_time,
             "duration": int(found_match.get("duration", 140)),
@@ -134,18 +135,18 @@ def _handle_end_command(arg: str, chat_id: int, bot_token: str, spreadsheet_name
         send_telegram_message(bot_token, chat_id, f"⚠️ Match '{match_name}' marked ended, but Cloudflare sync failed.")
 
 
-def _format_match_line(idx: int, ev: dict, default_player_url: str) -> str:
-    """Formats a single scraped match into a telegram status message."""
-    t1 = ev['team1'].get('nameEn') or ev['team1'].get('nameAr')
-    t2 = ev['team2'].get('nameEn') or ev['team2'].get('nameAr')
-    status = ev.get('status_class', 'unknown').upper()
+def _format_match_line(idx: int, ev: dict) -> str:
+    """Formats a single match from the API into a telegram status message."""
+    t1 = ev.get('team1', {}).get('nameEn') or ev.get('team1', {}).get('nameAr', '')
+    t2 = ev.get('team2', {}).get('nameEn') or ev.get('team2', {}).get('nameAr', '')
+    ended_suffix = " (FINISHED)" if ev.get("ended") else ""
     time_str = format_to_human_time(ev.get('time', ''))
-    ev_id = ev.get('event_id', '')
-    base_url = (default_player_url or "").rstrip("?/")
-    link = f"{base_url}/?match={ev_id}" if (ev_id and base_url) else ""
-    ch_cnt = len(ev.get('channels', []))
+    ev_id = ev.get('id') or ev.get('event_id', '')
+    link = get_match_player_url(ev_id)
+    ch_raw = ev.get('channels', 0)
+    ch_cnt = ch_raw if isinstance(ch_raw, int) else len(ch_raw) if isinstance(ch_raw, list) else 0
 
-    line = f"[{idx}] {t1} vs {t2} ({status}) - {time_str}"
+    line = f"[{idx}] {t1} vs {t2}{ended_suffix} - {time_str}"
     if ch_cnt > 0:
         line += f"\n   Channels: {ch_cnt}"
     if link:
@@ -153,32 +154,72 @@ def _format_match_line(idx: int, ev: dict, default_player_url: str) -> str:
     return line
 
 
-def _handle_match_command(chat_id: int, bot_token: str, spreadsheet_name: str, default_player_url: str, clients: dict):
-    """Handles /match command to display all currently scraped matches."""
-    if clients["sheets"] is None:
-        clients["sheets"] = sheets_client.get_gspread_client()
+def _check_is_synced(clients: dict, spreadsheet_name: str, cloudflare_api_url: str, api_matches: list) -> bool:
+    """Checks whether the Cloudflare Worker API and Google Sheets cache are in sync."""
+    try:
+        if clients.get("sheets") is None:
+            clients["sheets"] = sheets_client.get_gspread_client()
 
-    team_translations = translation_manager.load_team_translations(clients["sheets"], spreadsheet_name)
-    matches_cache = sheets_client.fetch_matches_cache(clients["sheets"], spreadsheet_name)
+        matches_cache = sheets_client.fetch_matches_cache(clients["sheets"], spreadsheet_name)
+        active_matches_list = assemble_matches_feed(matches_cache)
+        clean_sheet_matches = [
+            {k: v for k, v in m.items() if not k.startswith("_")}
+            for m in active_matches_list
+        ]
 
-    scraped_events, _, _, _ = scraper_engine.scrape_live_matches(
-        team_translations=team_translations, matches_cache=matches_cache
-    )
+        if api_matches != clean_sheet_matches:
+            return False
 
-    def _telegram_sort_key(ev):
-        prio = get_status_priority(
-            ev.get("status_class", "upcoming"),
-            has_stream=bool(ev.get("channels") or ev.get("link"))
-        )
-        dt = parse_iso_time(ev.get("time", ""))
-        t_val = dt.timestamp() if dt != datetime.min else 0.0
-        time_key = -t_val if (prio == 0 or ev.get("status_class") == "finished") else t_val
-        return (-prio, time_key)
+        # Verify channels map consistency
+        try:
+            resp = requests.get(f"{cloudflare_api_url.rstrip('/')}/channels", timeout=7)
+            if resp.status_code == 200:
+                data = resp.json()
+                api_channels = data.get("channels", {}) if isinstance(data, dict) else {}
+                sheet_channels = assemble_channels_map(matches_cache)
+                if api_channels != sheet_channels:
+                    return False
+        except Exception:
+            pass
 
-    scraped_events.sort(key=_telegram_sort_key)
+        return True
+    except Exception as e:
+        logger.error(f"Telegram Bot: Error checking sync status against Sheets: {e}")
+        return False
 
-    match_lines = [_format_match_line(idx, ev, default_player_url) for idx, ev in enumerate(scraped_events, 1)]
-    response_text = "Scraped Matches:\n\n" + "\n\n".join(match_lines) if match_lines else "No matches currently scraped."
+
+def _handle_match_command(chat_id: int, bot_token: str, spreadsheet_name: str, clients: dict):
+    """Handles /match command to display API matches and check Sheets sync status."""
+    cloudflare_api_url = get_cloudflare_api_url()
+    if not cloudflare_api_url:
+        send_telegram_message(bot_token, chat_id, "❌ CLOUDFLARE_API_URL is not configured.")
+        return
+
+    # Fetch live matches from Cloudflare API
+    try:
+        resp = requests.get(f"{cloudflare_api_url.rstrip('/')}/matches", timeout=10)
+        if resp.status_code != 200:
+            send_telegram_message(bot_token, chat_id, f"❌ Failed to fetch matches from API (HTTP {resp.status_code}).")
+            return
+        data = resp.json()
+        api_matches = data.get("matches", []) if isinstance(data, dict) else (data if isinstance(data, list) else [])
+    except Exception as e:
+        logger.error(f"Telegram Bot: Error fetching API matches: {e}")
+        send_telegram_message(bot_token, chat_id, f"❌ Failed to connect to Cloudflare API: {e}")
+        return
+
+    # Format matches list
+    if api_matches:
+        match_lines = [_format_match_line(idx, ev) for idx, ev in enumerate(api_matches, 1)]
+        matches_text = "\n\n".join(match_lines)
+    else:
+        matches_text = "No matches currently scheduled in API."
+
+    # Check sync status against Google Sheets
+    is_synced = _check_is_synced(clients, spreadsheet_name, cloudflare_api_url, api_matches)
+    sync_status = "Synced" if is_synced else "Not synced, /sync"
+
+    response_text = f"{matches_text}\n\n{sync_status}"
     send_telegram_message(bot_token, chat_id, response_text)
 
 
@@ -201,7 +242,7 @@ def _handle_sync_command(chat_id: int, bot_token: str, spreadsheet_name: str, cl
         send_telegram_message(bot_token, chat_id, "❌ Fast sync failed. Check pipeline logs.")
 
 
-def _process_update(update: dict, bot_token: str, spreadsheet_name: str, default_player_url: str, allowed_chat_ids: list, clients: dict):
+def _process_update(update: dict, bot_token: str, spreadsheet_name: str, allowed_chat_ids: list, clients: dict):
     """Dispatches a single message update to the appropriate command handler."""
     message = update.get("message")
     if not message:
@@ -224,7 +265,7 @@ def _process_update(update: dict, bot_token: str, spreadsheet_name: str, default
     if cmd == "/end":
         _handle_end_command(arg, chat_id, bot_token, spreadsheet_name, clients)
     elif cmd == "/match":
-        _handle_match_command(chat_id, bot_token, spreadsheet_name, default_player_url, clients)
+        _handle_match_command(chat_id, bot_token, spreadsheet_name, clients)
     elif cmd in ("/run", "/check"):
         _handle_run_command(chat_id, bot_token)
     elif cmd == "/sync":
@@ -234,7 +275,7 @@ def _process_update(update: dict, bot_token: str, spreadsheet_name: str, default
             "🤖 *TiviGoal Pipeline Bot*\n\n"
             "• `/run` - Run full pipeline (scrape competitor sites & sync)\n"
             "• `/sync` - Fast 1s sync (push Google Sheets directly to Cloudflare)\n"
-            "• `/match` - View all scraped matches and channel links\n"
+            "• `/match` - View API matches and sync status\n"
             "• `/end <team>` - Mark a match as ended"
         )
         send_telegram_message(bot_token, chat_id, help_msg)
@@ -243,7 +284,6 @@ def _process_update(update: dict, bot_token: str, spreadsheet_name: str, default
 def main():
     bot_token = get_telegram_bot_token()
     spreadsheet_name = get_spreadsheet_name()
-    default_player_url = get_default_player_url()
 
     if not bot_token:
         logger.error("TELEGRAM_BOT_TOKEN environment variable is not set.")
@@ -262,7 +302,7 @@ def main():
         uid = update.get("update_id", -1)
         if uid > max_update_id:
             max_update_id = uid
-        _process_update(update, bot_token, spreadsheet_name, default_player_url, allowed_chat_ids, clients)
+        _process_update(update, bot_token, spreadsheet_name, allowed_chat_ids, clients)
 
     _acknowledge_updates(bot_token, max_update_id)
 

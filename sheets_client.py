@@ -11,6 +11,7 @@ from utils import (
     resolve_timezone,
     is_match_expired,
     get_spreadsheet_name,
+    get_match_player_url,
 )
 
 SCOPES = [
@@ -219,13 +220,16 @@ def _filter_valid_cache_rows(matches_cache: dict, now: datetime, now_local_str: 
         ch_val = data.get("channels", "")
         ch_clean = "" if ch_val == "--" else ch_val
 
+        ev_id = data.get("event_id", event_id)
+        link_val = get_match_player_url(ev_id)
+
         row = [
-            data.get("event_id", event_id),
+            ev_id,
             data.get("team1_en", ""),
             data.get("team2_en", ""),
             data.get("team1_ar", ""),
             data.get("team2_ar", ""),
-            data.get("link", ""),
+            link_val,
             ch_clean,
             format_to_human_time(str(data.get("kickoff_time", ""))),
             duration,

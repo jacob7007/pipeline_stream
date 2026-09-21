@@ -459,6 +459,14 @@ def get_default_player_url() -> str:
     return os.environ.get("DEFAULT_PLAYER_URL", "https://tivivi-pla.blogspot.com").strip()
 
 
+def get_match_player_url(event_id: str) -> str:
+    """Constructs the standard player preview URL: {DEFAULT_PLAYER_URL}/?match={event_id}."""
+    if not event_id:
+        return ""
+    base_url = get_default_player_url().rstrip("?/")
+    return f"{base_url}/?match={event_id}" if base_url else ""
+
+
 def get_spreadsheet_name() -> str:
     """Returns the Google Sheets spreadsheet name/ID from SPREADSHEET_NAME env var."""
     val = os.environ.get("SPREADSHEET_NAME", "").strip()

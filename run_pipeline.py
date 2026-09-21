@@ -15,7 +15,7 @@ from utils import (
     get_telegram_bot_token,
     get_cloudflare_api_url,
     get_cloudflare_sync_token,
-    get_default_player_url,
+    get_match_player_url,
     get_status_priority,
     get_match_lookahead_hours,
     parse_user_styled_time,
@@ -46,7 +46,6 @@ configure_utf8()
 SPREADSHEET_NAME = get_spreadsheet_name()
 CLOUDFLARE_API_URL = get_cloudflare_api_url()
 CLOUDFLARE_SYNC_TOKEN = get_cloudflare_sync_token()
-DEFAULT_PLAYER_URL = get_default_player_url()
 
 
 # ============================================================================
@@ -556,14 +555,13 @@ def _init_clients():
         raise PipelineAbortError("GOOGLE SHEETS CLIENT INITIALIZATION FAILED", str(e))
 
 
-def _send_domain_alerts(alerts: list, telegram_token: str, chat_ids: list, default_player_url: str = None) -> None:
+def _send_domain_alerts(alerts: list, telegram_token: str, chat_ids: list) -> None:
     """Sends a single batch Telegram notification for all '--' iframe domains found this run.
     Each alert is enriched with the match player URL.
     """
     if not alerts or not telegram_token or not chat_ids:
         return
 
-    base_url = (default_player_url or DEFAULT_PLAYER_URL or "").rstrip("?/")
     lines = []
     for i, alert in enumerate(alerts, start=1):
         domain       = alert.get("domain", "unknown")
@@ -571,7 +569,7 @@ def _send_domain_alerts(alerts: list, telegram_token: str, chat_ids: list, defau
         channel_name = alert.get("channel_name", "Unknown Channel")
         event_id     = alert.get("event_id", "")
 
-        post_url = f"{base_url}/?match={event_id}" if (event_id and base_url) else ""
+        post_url = get_match_player_url(event_id)
 
         line = f"{i}. {domain}\n   Match: {match_name}\n   Channel: {channel_name}"
         if post_url:
@@ -642,7 +640,6 @@ def main():
             channels_engine.get_pending_alerts(),
             telegram_token,
             allowed_chat_ids,
-            default_player_url=DEFAULT_PLAYER_URL,
         )
         print()
         print()
