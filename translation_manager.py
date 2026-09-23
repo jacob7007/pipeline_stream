@@ -22,11 +22,11 @@ def _parse_translation_sheet(sh, sheet_name: str, type_label: str, translations:
     try:
         worksheet = sh.worksheet(sheet_name)
     except gspread.exceptions.WorksheetNotFound:
-        worksheet = sh.add_worksheet(title=sheet_name, rows="1000", cols="5")
+        worksheet = sh.add_worksheet(title=sheet_name, rows="1000", cols="6")
         if type_label == "national":
-            worksheet.append_row(["arabic_aliases", "primary_arabic_name", "primary_english_name", "code", "logo_url"])
+            worksheet.append_row(["arabic_aliases", "primary_arabic_name", "primary_english_name", "code", "logo_url", "sofascore_code"])
         else:
-            worksheet.append_row(["arabic_aliases", "primary_arabic_name", "primary_english_name", "canonical_synonyms", "logo_url"])
+            worksheet.append_row(["arabic_aliases", "primary_arabic_name", "primary_english_name", "canonical_synonyms", "logo_url", "sofascore_code"])
         return
 
     all_values = worksheet.get_all_values()
@@ -38,9 +38,9 @@ def _parse_translation_sheet(sh, sheet_name: str, type_label: str, translations:
     header_map = {h: idx for idx, h in enumerate(headers)}
 
     for idx, row in enumerate(rows, start=2):
-        padded_row = row + [""] * (max(5, len(headers)) - len(row))
+        padded_row = row + [""] * (max(6, len(headers)) - len(row))
 
-        # Column resolution supporting 5-column headers (with positional fallback)
+        # Column resolution supporting 6-column headers (with positional fallback)
         aliases_raw = padded_row[header_map.get("arabic_aliases", 0)].strip()
         primary_arabic = padded_row[header_map.get("primary_arabic_name", 1 if "primary_arabic_name" in header_map else 0)].strip()
 
@@ -66,6 +66,8 @@ def _parse_translation_sheet(sh, sheet_name: str, type_label: str, translations:
             synonyms_raw = padded_row[header_map.get("canonical_synonyms", 3)].strip()
             logo_url = padded_row[header_map.get("logo_url", 4)].strip()
 
+        sofascore_code = padded_row[header_map["sofascore_code"]].strip() if "sofascore_code" in header_map else (padded_row[5].strip() if len(padded_row) > 5 else "")
+
         # "--" means "needs human review" — treat as Unknown so the script never uses bad data
         if not name_en or name_en == "--":
             name_en = "Unknown"
@@ -80,6 +82,7 @@ def _parse_translation_sheet(sh, sheet_name: str, type_label: str, translations:
             "nameEn": name_en,
             "code": code,
             "logo_url": logo_url,
+            "sofascore_code": sofascore_code,
             "type": type_label,
             "row_num": idx,
             "sheet_name": sheet_name,
@@ -197,27 +200,27 @@ def update_team_aliases(client, alias_updates: list, spreadsheet_name: str = Non
 
 
 def save_new_team_translations_separated(client, new_translations: list, spreadsheet_name: str = None):
-    """Appends new 5-column translation rows to either '_cache_national_teams' or '_cache_clubs' worksheet."""
+    """Appends new 6-column translation rows to either '_cache_national_teams' or '_cache_clubs' worksheet."""
     if not new_translations:
         return
 
     spreadsheet_name = (spreadsheet_name or get_spreadsheet_name()).strip()
     sh = open_spreadsheet(client, spreadsheet_name)
-    # national: [arabic_aliases, primary_arabic_name, primary_english_name, code, logo_url]
-    national_rows = [["", t[0], t[1], t[2], sanitize_sheet_image_url(t[3])] for t in new_translations if t[4] == "national"]
-    # clubs: [arabic_aliases, primary_arabic_name, primary_english_name, canonical_synonyms, logo_url]
-    club_rows = [["", t[0], t[1], "", sanitize_sheet_image_url(t[3])] for t in new_translations if t[4] != "national"]
+    # national: [arabic_aliases, primary_arabic_name, primary_english_name, code, logo_url, sofascore_code]
+    national_rows = [["", t[0], t[1], t[2], sanitize_sheet_image_url(t[3]), ""] for t in new_translations if t[4] == "national"]
+    # clubs: [arabic_aliases, primary_arabic_name, primary_english_name, canonical_synonyms, logo_url, sofascore_code]
+    club_rows = [["", t[0], t[1], "", sanitize_sheet_image_url(t[3]), ""] for t in new_translations if t[4] != "national"]
 
     for sheet_name, rows, headers in [
-        ("_cache_national_teams", national_rows, ["arabic_aliases", "primary_arabic_name", "primary_english_name", "code", "logo_url"]),
-        ("_cache_clubs", club_rows, ["arabic_aliases", "primary_arabic_name", "primary_english_name", "canonical_synonyms", "logo_url"])
+        ("_cache_national_teams", national_rows, ["arabic_aliases", "primary_arabic_name", "primary_english_name", "code", "logo_url", "sofascore_code"]),
+        ("_cache_clubs", club_rows, ["arabic_aliases", "primary_arabic_name", "primary_english_name", "canonical_synonyms", "logo_url", "sofascore_code"])
     ]:
         if not rows:
             continue
         try:
             worksheet = sh.worksheet(sheet_name)
         except gspread.exceptions.WorksheetNotFound:
-            worksheet = sh.add_worksheet(title=sheet_name, rows="1000", cols="5")
+            worksheet = sh.add_worksheet(title=sheet_name, rows="1000", cols="6")
             worksheet.append_row(headers)
 
         worksheet.append_rows(rows)
@@ -345,6 +348,7 @@ def _add_placeholder_row(name: str, logo_url: str, team_translations: dict, new_
         "nameEn": "Unknown",
         "code": "",
         "logo_url": clean_logo,
+        "sofascore_code": "",
         "type": "club",
         "primary_arabic": name,
         "arabic_aliases": [],
@@ -484,6 +488,7 @@ def resolve_missing_teams(missing_team_names: list, team_translations: dict, mat
             "nameEn": name_en,
             "code": code,
             "logo_url": clean_logo,
+            "sofascore_code": "",
             "type": team_type,
             "primary_arabic": name,
             "arabic_aliases": [],
