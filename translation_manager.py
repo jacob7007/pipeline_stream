@@ -68,8 +68,8 @@ def _parse_translation_sheet(sh, sheet_name: str, type_label: str, translations:
 
         sofascore_code = padded_row[header_map["sofascore_code"]].strip() if "sofascore_code" in header_map else (padded_row[5].strip() if len(padded_row) > 5 else "")
 
-        # "--" means "needs human review" — treat as Unknown so the script never uses bad data
-        if not name_en or name_en == "--":
+        # Empty string means "needs human review" — treat as Unknown so the script never uses bad data
+        if not name_en:
             name_en = "Unknown"
             code = ""
 
@@ -276,6 +276,7 @@ def fetch_openrouter_mappings(unique_names: list) -> dict:
         "   - NEVER echo the Arabic input back as the English name.\n"
         "   - NEVER invent or guess a name you are not confident about.\n\n"
         "2. \"code\":\n"
+        "   - CRITICAL: Never output a country code for a club team, even if you know what country the club plays in. Club code MUST ALWAYS be empty string \"\".\n"
         "   - For NATIONAL TEAMS only: the standard 2-letter lowercase ISO 3166-1 alpha-2 country code.\n"
         "     Examples: \"ma\" (Morocco), \"es\" (Spain), \"fr\" (France), \"eg\" (Egypt), \"sa\" (Saudi Arabia).\n"
         "     UK nations: \"gb-eng\", \"gb-sct\", \"gb-wls\", \"gb-nir\".\n"
@@ -332,7 +333,7 @@ def _resolve_team_logo_and_type(name: str, code: str, matches_to_process: list) 
 
 def _is_unknown_team(name_en: str) -> bool:
     """Returns True if the AI response indicates it does not know this team."""
-    if not name_en or not str(name_en).strip() or str(name_en).strip().lower() in ("unknown", "--", "none"):
+    if not name_en or not str(name_en).strip() or str(name_en).strip().lower() in ("unknown", "none"):
         return True
     # Detect Arabic characters echoed back as nameEn
     if any('\u0600' <= c <= '\u06FF' for c in str(name_en)):
@@ -342,7 +343,7 @@ def _is_unknown_team(name_en: str) -> bool:
 
 
 def _add_placeholder_row(name: str, logo_url: str, team_translations: dict, new_translations_list: list):
-    """Writes a '--' placeholder row to Sheets and sets the team as Unknown in memory."""
+    """Writes a placeholder row with empty English name to Sheets and sets the team as Unknown in memory."""
     clean_logo = sanitize_sheet_image_url(logo_url)
     team_translations[name] = {
         "nameEn": "Unknown",
@@ -355,7 +356,7 @@ def _add_placeholder_row(name: str, logo_url: str, team_translations: dict, new_
         "canonical_synonyms": [],
         "original_aliases_cell": ""
     }
-    new_translations_list.append((name, "--", "", clean_logo, "club"))
+    new_translations_list.append((name, "", "", clean_logo, "club"))
 
 
 def _is_valid_iso_code(code: str) -> bool:
@@ -432,8 +433,8 @@ def resolve_missing_teams(missing_team_names: list, team_translations: dict, mat
         team_type, logo_url = _resolve_team_logo_and_type(name, code, matches_to_process)
 
         if _is_unknown_team(name_en):
-            # AI does not know this team — write "--" placeholder row for human review
-            logger.warning(f"Translation: Unknown team '{name}' — adding '--' row to Google Sheets for human review.")
+            # AI does not know this team — write placeholder row with empty English name for human review
+            logger.warning(f"Translation: Unknown team '{name}' — adding row with empty English name to Google Sheets for human review.")
             _add_placeholder_row(name, logo_url, team_translations, new_translations_list)
             continue
 

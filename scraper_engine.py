@@ -7,7 +7,7 @@ import requests
 
 import logger
 from utils import (
-    get_now_local,
+    get_now_utc,
     get_allowed_chat_ids,
     get_telegram_bot_token,
     broadcast_telegram,
@@ -22,11 +22,14 @@ from utils import (
     is_match_in_24h_window,
     is_match_starting_soon,
     get_match_default_duration_minutes,
+    get_stream_glitch_grace_minutes,
     DEFAULT_HEADERS,
     PLACEHOLDER_IMAGE_URL,
     sanitize_sheet_image_url,
     get_spreadsheet_name,
     get_match_player_url,
+    get_channels_count,
+    is_valid_time,
 )
 
 from translation_manager import find_existing_translation, resolve_missing_teams
@@ -135,7 +138,7 @@ def migrate_matches_cache_translations(matches_cache: dict, team_translations: d
         if raw_k_time:
             try:
                 dt = parse_user_styled_time(raw_k_time)
-                if dt != datetime.min:
+                if is_valid_time(dt):
                     kickoff_iso = dt.isoformat()
             except Exception:
                 kickoff_iso = ""
@@ -467,7 +470,7 @@ def _build_match_event(match_data: dict, team_translations: dict, matches_cache:
             "status_class": status_class,
             "plugin": plugin_name,
             "sources": sources,
-            "last_updated": now_dt.isoformat()
+            "last_updated": now_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
         }
     }
     return event, cache_entry
@@ -516,6 +519,73 @@ def _merge_channel_lists(channels_a: list, channels_b: list) -> list:
         c["name"] = f"Live {idx}"
 
     return merged
+
+
+def _prune_unbroadcasted_matches(
+    parsed_matches_map: dict,
+    updated_matches_cache: dict,
+    now_dt: datetime,
+    plugin_health: dict = None,
+) -> None:
+    """
+    Prunes matches that never had valid channels (0 channels) and are 15+ minutes past kickoff.
+    Runs at the end of _process_matches, strictly AFTER all channel preservation layers
+    (cached channel fallback, multi-source glitched plugin preservation, and cache retention) have run.
+
+    Applies to BOTH:
+    1. Matches still listed on competitor websites (removed from parsed_matches_map & updated_matches_cache).
+    2. Matches that disappeared from competitor websites (removed from updated_matches_cache).
+
+    Safety guards:
+    - Retains matches if their source plugin glitched during scraping (prevents dropping matches due to scraper outages).
+    - Preserves finished matches.
+    """
+    grace_minutes = get_stream_glitch_grace_minutes()
+    threshold = timedelta(minutes=grace_minutes)
+
+    for ev_id, match in list(updated_matches_cache.items()):
+        # 1. Channels check: if match has >= 1 valid channels, never prune
+        if get_channels_count(match.get("channels")) > 0:
+            continue
+
+        # 2. Status check: finished matches are never pruned as unbroadcasted
+        status_class = (match.get("status_class") or "").strip().lower()
+        if status_class == "finished":
+            continue
+
+        # 3. Kickoff time check: must have a valid kickoff time
+        k_time = match.get("kickoff_time", "")
+        dt_kickoff = parse_user_styled_time(k_time)
+        if not is_valid_time(dt_kickoff):
+            continue
+
+        # 4. Kickoff threshold: must be >= grace_minutes (default 15) past kickoff
+        if now_dt < dt_kickoff + threshold:
+            continue
+
+        # 5. Glitch protection guard: retain if source plugin glitched
+        if match.get("source_glitched"):
+            ev_name = match.get("event_name", ev_id)
+            match_sources = match.get("sources", [])
+            glitched_names = ", ".join([p for p in match_sources if plugin_health and plugin_health.get(p) is False]) or "source plugin"
+            logger.info(f"Cache: Retaining ghost match '{ev_name}' despite 0 channels (source plugin(s) '{glitched_names}' glitched).")
+            continue
+
+        # 6. Prune the match
+        ev_name = match.get("event_name", ev_id)
+        if ev_id in parsed_matches_map:
+            del parsed_matches_map[ev_id]
+            logger.info(
+                f"Scraper: Pruned unbroadcasted match '{ev_name}' "
+                f"(0 channels, {grace_minutes}+ min past kickoff - still on competitor website)."
+            )
+        else:
+            logger.info(
+                f"Cache: Pruned unbroadcasted match '{ev_name}' "
+                f"(0 channels, {grace_minutes}+ min past kickoff - disappeared from competitor sources)."
+            )
+
+        del updated_matches_cache[ev_id]
 
 
 def _process_matches(
@@ -613,8 +683,10 @@ def _process_matches(
                         c_k = str(c_entry.get("kickoff_time", "")).strip()
                         ev_k = str(ev.get("time", "")).strip()
                         ev_human = format_to_human_time(ev_k)
+                        c_dt = parse_user_styled_time(c_k)
+                        ev_dt = parse_user_styled_time(ev_k)
                         time_matches = (c_k and (c_k == ev_human or c_k == ev_k)) or (
-                            parse_user_styled_time(c_k) != datetime.min and parse_user_styled_time(c_k) == parse_user_styled_time(ev_k)
+                            is_valid_time(c_dt) and is_valid_time(ev_dt) and c_dt == ev_dt
                         )
                         if time_matches:
                             t1_a = ev["team1"]["nameEn"] or ev["team1"]["nameAr"]
@@ -680,22 +752,6 @@ def _process_matches(
                     plugin_health and any(plugin_health.get(p) is False for p in match_sources)
                 )
 
-                # Prune unbroadcasted matches that disappeared from all competitor scrapers past kickoff with no active stream
-                has_active_link = bool(cached_entry.get("link") and str(cached_entry.get("link")).strip())
-                has_active_stream = has_active_link
-
-                dt_kickoff = parse_user_styled_time(k_time)
-                if not has_active_stream and dt_kickoff != datetime.min and cached_entry.get("status_class") != "finished":
-                    if now_dt >= dt_kickoff + timedelta(minutes=15):
-                        if not is_plugin_glitched:
-                            ev_name = cached_entry.get("event_name", ev_id)
-                            logger.info(f"Cache: Pruned unbroadcasted match '{ev_name}' (disappeared from competitor sources past kickoff with no stream).")
-                            continue
-                        else:
-                            ev_name = cached_entry.get("event_name", ev_id)
-                            glitched_names = ", ".join([p for p in match_sources if plugin_health.get(p) is False])
-                            logger.info(f"Cache: Retaining match '{ev_name}' despite missing from scrape (source plugin(s) '{glitched_names}' glitched).")
-
                 retained_entry = dict(cached_entry)
                 retained_entry["sources"] = match_sources
                 if is_plugin_glitched:
@@ -706,6 +762,11 @@ def _process_matches(
                     retained_entry["status_class"] = "finished"
 
                 updated_matches_cache[ev_id] = retained_entry
+
+    # Centralized ghost match pruning: runs strictly after all channel preservation and cache retention layers
+    _prune_unbroadcasted_matches(
+        parsed_matches_map, updated_matches_cache, now_dt, plugin_health=plugin_health
+    )
 
     return list(parsed_matches_map.values()), updated_matches_cache
 
@@ -768,7 +829,7 @@ def scrape_live_matches(
 
     logger.step_header("3/4", "Resolving Streams")
 
-    now_dt = get_now_local()
+    now_dt = get_now_utc()
     parsed_matches, updated_matches_cache = _process_matches(
         matches_to_process, team_translations, matches_cache, now_dt, get_request_proxies(), plugin_health=plugin_health
     )

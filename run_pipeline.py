@@ -4,7 +4,7 @@ import json
 import base64
 import argparse
 from urllib.parse import unquote
-from datetime import datetime
+from datetime import datetime, timezone
 
 from utils import (
     load_env,
@@ -21,13 +21,15 @@ from utils import (
     parse_user_styled_time,
     parse_iso_time,
     resolve_timezone,
-    get_now_local,
+    get_now_utc,
     is_match_expired,
     is_match_starting_soon,
     sanitize_sheet_image_url,
     PLACEHOLDER_IMAGE_URL,
     broadcast_telegram,
-    PipelineAbortError
+    PipelineAbortError,
+    get_channels_count,
+    is_valid_time,
 )
 
 load_env()
@@ -109,7 +111,7 @@ def _display_scraped_events(scraped_events: list):
 
     max_date_len = max((len(format_to_human_time(ev['time'])) for ev in scraped_events), default=14)
     max_status_len = 8
-    now_dt = get_now_local()
+    now_dt = get_now_utc()
 
     for idx, ev in enumerate(scraped_events, 1):
         t1 = ev['team1'].get('nameEn') or ev['team1']['nameAr']
@@ -199,10 +201,10 @@ def scrape_matches_step(
     def _scraped_sort_key(ev):
         prio = get_status_priority(
             ev.get("status_class", "upcoming"),
-            has_stream=bool(ev.get("channels") or ev.get("link"))
+            has_stream=bool(ev.get("channels"))
         )
         dt = parse_iso_time(ev.get("time", ""))
-        t_val = dt.timestamp() if dt != datetime.min else 0.0
+        t_val = dt.timestamp() if is_valid_time(dt) else 0.0
         time_key = -t_val if (prio == 0 or ev.get("status_class") == "finished") else t_val
         return (-prio, time_key)
 
@@ -223,34 +225,13 @@ def scrape_matches_step(
 
 def _get_channels_count(channels_raw) -> int:
     """Extracts channel count from raw list, JSON string, or Base64 payload."""
-    if not channels_raw:
-        return 0
-    if isinstance(channels_raw, list):
-        return len(channels_raw)
-    if isinstance(channels_raw, str):
-        s = channels_raw.strip()
-        if not s:
-            return 0
-        try:
-            p = json.loads(s)
-            if isinstance(p, list):
-                return len(p)
-        except Exception:
-            pass
-        try:
-            d = base64.b64decode(s).decode("utf-8")
-            p = json.loads(unquote(d))
-            if isinstance(p, list):
-                return len(p)
-        except Exception:
-            pass
-    return 0
+    return get_channels_count(channels_raw)
 
 
 def assemble_matches_feed(matches_cache: dict) -> list[dict]:
     """Builds and sorts the standardized matches array for Cloudflare KV from matches_cache."""
     feed_list = []
-    now_dt = get_now_local()
+    now_dt = get_now_utc()
     for ev_id, match in matches_cache.items():
         t1_ar = match.get("team1_ar", "").strip()
         t1_en = match.get("team1_en", "").strip()
@@ -275,13 +256,21 @@ def assemble_matches_feed(matches_cache: dict) -> list[dict]:
             continue
 
         time_iso = raw_time
-        if raw_time and "T" not in raw_time:
-            try:
-                dt = parse_user_styled_time(raw_time)
-                if dt != datetime.min:
-                    time_iso = dt.replace(tzinfo=resolve_timezone(None)).isoformat()
-            except Exception:
-                time_iso = raw_time
+        if raw_time:
+            if "T" not in raw_time:
+                try:
+                    dt = parse_user_styled_time(raw_time)
+                    if is_valid_time(dt):
+                        time_iso = dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+                except Exception:
+                    time_iso = raw_time
+            else:
+                try:
+                    dt = parse_iso_time(raw_time)
+                    if is_valid_time(dt):
+                        time_iso = dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+                except Exception:
+                    time_iso = raw_time
 
         status_class = match.get("status_class", "upcoming").strip().lower()
         if status_class not in ["live", "upcoming", "finished"]:
@@ -334,7 +323,7 @@ def assemble_matches_feed(matches_cache: dict) -> list[dict]:
             has_stream=(m.get("channels", 0) > 0)
         )
         dt = parse_iso_time(m.get("time", ""))
-        t_val = dt.timestamp() if dt != datetime.min else 0.0
+        t_val = dt.timestamp() if is_valid_time(dt) else 0.0
         time_key = -t_val if (prio == 0 or m.get("ended")) else t_val
         return (-prio, time_key)
 
@@ -352,7 +341,7 @@ def assemble_channels_map(matches_cache: dict) -> dict[str, list[dict]]:
     Only includes active (non-expired) matches from cache.
     """
     channels_map = {}
-    now_dt = get_now_local()
+    now_dt = get_now_utc()
 
     for ev_id, match in matches_cache.items():
         raw_time = str(match.get("kickoff_time", "")).strip()
@@ -383,7 +372,7 @@ def display_data_matches(active_matches_list: list):
     max_t2_len = max((len(m['team2'].get('nameEn') or m['team2']['nameAr']) for m in active_matches_list), default=15)
     max_date_len = max((len(format_to_human_time(m.get('time', ''))) for m in active_matches_list), default=14)
     max_status_len = 8
-    now_dt = get_now_local()
+    now_dt = get_now_utc()
 
     for idx, m in enumerate(active_matches_list, start=1):
         t1 = m['team1'].get('nameEn') or m['team1']['nameAr']

@@ -1,6 +1,9 @@
 import os
 import sys
 import re
+import json
+import base64
+from urllib.parse import unquote
 import requests
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
@@ -119,40 +122,78 @@ def strip_timezone(time_str: str) -> str:
         return ""
     return re.sub(r'([+-]\d{2}:?\d{2}|Z)$', '', time_str.strip())
 
-def format_to_human_time(time_input: str | datetime) -> str:
+def _ensure_utc(dt_val: datetime) -> datetime:
+    """Ensures a datetime object is timezone-aware UTC."""
+    if dt_val.tzinfo is None:
+        return dt_val.replace(tzinfo=timezone.utc)
+    return dt_val.astimezone(timezone.utc)
+
+
+MIN_UTC_DATETIME = datetime.min.replace(tzinfo=timezone.utc)
+
+
+def is_valid_time(dt_val: datetime | None) -> bool:
+    """Returns True if dt_val is a valid datetime and not MIN_UTC_DATETIME or naive datetime.min."""
+    if not dt_val or not isinstance(dt_val, datetime):
+        return False
+    return dt_val != MIN_UTC_DATETIME and dt_val != datetime.min
+
+
+def format_to_human_time(time_input: str | datetime, target_tz=None) -> str:
     """
-    Converts ISO 8601 time string or datetime object to user format: "22 Aug - 19:45".
+    Converts UTC ISO 8601 time string or datetime object to user format in target_tz (default DEFAULT_TIMEZONE):
+    e.g. "22 Aug - 19:45".
     """
     if not time_input:
         return ""
-    if isinstance(time_input, datetime):
-        return f"{time_input.day} {time_input.strftime('%b')} - {time_input.strftime('%H:%M')}"
-    time_str = str(time_input).strip()
+    target_zone = resolve_timezone(target_tz)
     try:
-        dt = datetime.fromisoformat(time_str)
-        return f"{dt.day} {dt.strftime('%b')} - {dt.strftime('%H:%M')}"
+        if isinstance(time_input, datetime):
+            dt = _ensure_utc(time_input)
+        else:
+            time_str = str(time_input).strip()
+            if not time_str:
+                return ""
+            # If already in human format (e.g. "22 Aug - 19:45"), return as-is
+            if "T" not in time_str and "-" in time_str and any(b in time_str for b in ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")):
+                return time_str
+            clean_iso = time_str.replace("Z", "+00:00")
+            dt = _ensure_utc(datetime.fromisoformat(clean_iso))
+        dt_local = dt.astimezone(target_zone)
+        return f"{dt_local.day} {dt_local.strftime('%b')} - {dt_local.strftime('%H:%M')}"
     except Exception:
-        return time_str
+        return str(time_input).strip()
+
+
+def get_now_utc() -> datetime:
+    """Returns current UTC time as an aware datetime."""
+    return datetime.now(timezone.utc)
+
 
 def get_now_local() -> datetime:
-    """Returns the current time in DEFAULT_TIMEZONE as a naive datetime."""
+    """Returns current time in DEFAULT_TIMEZONE as a naive datetime (for legacy compatibility)."""
     return datetime.now(get_default_timezone()).replace(tzinfo=None)
+
 
 def parse_iso_time(time_str: str) -> datetime:
     """
-    Parses ISO time string, falling back to datetime.min if parsing fails or string is empty.
-    Strips timezone offset to avoid mixing aware/naive datetimes.
+    Parses ISO time string to UTC-aware datetime.
+    Returns MIN_UTC_DATETIME if parsing fails or string is empty.
     """
     if not time_str:
-        return datetime.min
+        return MIN_UTC_DATETIME
     try:
-        clean_str = strip_timezone(time_str)
-        return datetime.fromisoformat(clean_str)
+        clean_iso = str(time_str).strip().replace("Z", "+00:00")
+        dt = datetime.fromisoformat(clean_iso)
+        return _ensure_utc(dt)
     except Exception:
         try:
-            return datetime.strptime(time_str.split('+')[0].split('.')[0], "%Y-%m-%dT%H:%M:%S")
+            base_part = str(time_str).split('+')[0].split('.')[0].rstrip('Z')
+            dt = datetime.strptime(base_part, "%Y-%m-%dT%H:%M:%S")
+            return dt.replace(tzinfo=timezone.utc)
         except Exception:
-            return datetime.min
+            return MIN_UTC_DATETIME
+
 
 def normalize_time_str(time_str: str) -> str:
     """
@@ -172,22 +213,22 @@ def normalize_time_str(time_str: str) -> str:
     text = re.sub(r'(?i)(?:\bصباح\b|\bص\b|am|(?<=\d)\s*ص(?!\w))', ' AM ', text)
     return re.sub(r'\s+', ' ', text).strip()
 
+
 def parse_match_time(date_str: str, time_str: str, source_tz: str | int = None, tz_offset: int = None) -> str:
     """
-    Parses date and time strings from a source website and converts it to DEFAULT_TIMEZONE ISO 8601 string.
+    Parses date and time strings from a source website and converts directly to Pure UTC ISO 8601 string.
 
     Args:
         date_str:   Date in YYYY-MM-DD format.
         time_str:   Time string as shown on the source website (e.g. "09:00 PM", "14:00", "14:00:00", "7:00 م").
-        source_tz:  The source website's timezone identifier (e.g. "Asia/Riyadh", "+01:00", "Etc/GMT-3").
+        source_tz:  The source website's timezone identifier (e.g. "Asia/Riyadh", "+01:00", "Etc/GMT").
         tz_offset:  Optional backwards-compatible numeric offset parameter.
 
     Returns:
-        ISO 8601 string in DEFAULT_TIMEZONE (e.g. "2026-08-21T19:00:00+01:00").
+        Pure UTC ISO 8601 string (e.g. "2026-08-21T19:00:00Z").
     """
     actual_source_tz = tz_offset if tz_offset is not None else source_tz
     src_zone = resolve_timezone(actual_source_tz)
-    target_zone = get_default_timezone()
 
     normalized = normalize_time_str(time_str)
 
@@ -213,7 +254,7 @@ def parse_match_time(date_str: str, time_str: str, source_tz: str | int = None, 
 
     if dt_naive is None:
         try:
-            dt_iso = datetime.fromisoformat(time_str)
+            dt_iso = datetime.fromisoformat(time_str.replace("Z", "+00:00"))
             dt_naive = dt_iso.replace(tzinfo=None)
             if dt_iso.tzinfo:
                 src_zone = dt_iso.tzinfo
@@ -222,58 +263,59 @@ def parse_match_time(date_str: str, time_str: str, source_tz: str | int = None, 
 
     if dt_naive:
         dt_source = dt_naive.replace(tzinfo=src_zone)
-        dt_target = dt_source.astimezone(target_zone)
-        return dt_target.isoformat()
+        dt_utc = dt_source.astimezone(timezone.utc)
+        return dt_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    logger.warning(f"Could not parse match time '{date_str} {time_str}', falling back to midnight.")
-    fallback_dt = datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=target_zone)
-    return fallback_dt.isoformat()
+    logger.warning(f"Could not parse match time '{date_str} {time_str}', falling back to UTC midnight.")
+    fallback_dt = datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    return fallback_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def parse_user_styled_time(time_str: str) -> datetime:
     """
-    Parses user-styled date string (e.g. "25 Aug - 00:01", "22 Aug | 19:45", "29 June 21:00 (UTC+1)")
-    or falls back to ISO format. Returns a naive datetime in local/default timezone.
+    Parses standard user format ("23 Sep - 21:00", "23 Sep - 09:00 PM" in DEFAULT_TIMEZONE) or UTC ISO ("2026-09-23T20:00:00Z").
+    Returns a UTC-aware datetime.
     """
     if not time_str:
-        return datetime.min
+        return MIN_UTC_DATETIME
 
-    # Strip any parenthetical timezone comments like (UTC+1), (GMT+3), (DEFAULT_TIMEZONE, +01:00)
-    clean = re.sub(r'\(.*?\)', '', str(time_str)).strip()
-    clean = normalize_time_str(clean)
+    clean = str(time_str).strip()
 
-    current_year = datetime.now().year
+    # Fast-path: ISO format (e.g. "2026-09-23T20:00:00Z")
+    if "T" in clean:
+        dt_iso = parse_iso_time(clean)
+        if dt_iso != MIN_UTC_DATETIME:
+            return dt_iso
 
-    # Normalize separators (replace -, |, / with single space)
-    normalized = re.sub(r'[-|/]', ' ', clean)
-    normalized = re.sub(r'\s+', ' ', normalized).strip()
+    current_year = datetime.now(timezone.utc).year
+    target_zone = get_default_timezone()
 
-    formats = (
-        "%Y %d %b %H:%M",       # 2026 25 Aug 00:01
-        "%Y %d %B %H:%M",       # 2026 25 August 00:01
-        "%Y %d %b %I:%M %p",    # 2026 25 Aug 09:00 PM
-        "%Y %d %B %I:%M %p",    # 2026 25 August 09:00 PM
-        "%Y %b %d %H:%M",       # 2026 Aug 25 00:01
-        "%Y %B %d %H:%M",       # 2026 August 25 00:01
-        "%Y-%m-%d %H:%M:%S",    # 2026-08-25 00:01:00
-        "%Y-%m-%d %H:%M",       # 2026-08-25 00:01
-    )
+    # Match standard format: "23 Sep - 21:00", "23 Sep - 09:00 PM", "23 September - 21:00", etc.
+    m = re.match(r'^(\d{1,2})\s+([A-Za-z]+)(?:\s*-\s*|\s+)(\d{1,2}:\d{2}(?:\s*(?:AM|PM|am|pm))?)$', clean)
+    if m:
+        day, month_name, time_part = m.groups()
+        time_part = time_part.upper()
+        for fmt in (
+            "%Y %d %b %H:%M",
+            "%Y %d %B %H:%M",
+            "%Y %d %b %I:%M %p",
+            "%Y %d %B %I:%M %p",
+        ):
+            try:
+                dt_naive = datetime.strptime(f"{current_year} {day} {month_name} {time_part}", fmt)
+                dt_local = dt_naive.replace(tzinfo=target_zone)
+                return dt_local.astimezone(timezone.utc)
+            except ValueError:
+                continue
 
-    for fmt in formats:
-        try:
-            target_str = f"{current_year} {normalized}" if not re.match(r'^\d{4}', normalized) else normalized
-            return datetime.strptime(target_str, fmt)
-        except ValueError:
-            continue
-
-    # Fallback to ISO format parsing
+    # Fallback to standard datetime string (e.g. "2026-09-23 20:00:00")
     try:
-        clean_str = strip_timezone(clean)
-        return datetime.fromisoformat(clean_str)
+        dt_parsed = datetime.fromisoformat(clean.replace("Z", "+00:00"))
+        return _ensure_utc(dt_parsed)
     except Exception:
         pass
 
-    return datetime.min
+    return MIN_UTC_DATETIME
 
 
 def get_match_lookahead_hours() -> float:
@@ -321,7 +363,7 @@ def get_stream_glitch_grace_minutes() -> int:
         return 15
 
 
-def is_match_expired(kickoff_time: str | datetime, duration: int | str, now_dt: datetime, grace_minutes: int = None) -> bool:
+def is_match_expired(kickoff_time: str | datetime, duration: int | str, now_dt: datetime = None, grace_minutes: int = None) -> bool:
     """
     Returns True if the current time is at or past the match expiration time (Kickoff + Duration + Grace Period).
     """
@@ -330,34 +372,38 @@ def is_match_expired(kickoff_time: str | datetime, duration: int | str, now_dt: 
     if not kickoff_time:
         return False
     dt = kickoff_time if isinstance(kickoff_time, datetime) else parse_user_styled_time(kickoff_time)
-    if dt == datetime.min:
+    if not is_valid_time(dt):
         return False
+    dt = _ensure_utc(dt)
+    now_utc = _ensure_utc(now_dt) if now_dt is not None else get_now_utc()
     try:
         duration_mins = int(duration) if duration else get_match_default_duration_minutes()
     except (ValueError, TypeError):
         duration_mins = get_match_default_duration_minutes()
     expiry_dt = dt + timedelta(minutes=duration_mins + grace_minutes)
-    return now_dt >= expiry_dt
+    return now_utc >= expiry_dt
 
 
-def is_match_ended(kickoff_time: str | datetime, duration: int | str, now_dt: datetime) -> bool:
+def is_match_ended(kickoff_time: str | datetime, duration: int | str, now_dt: datetime = None) -> bool:
     """
     Returns True if the match has passed its scheduled duration (Kickoff + Duration).
     """
     if not kickoff_time:
         return False
     dt = kickoff_time if isinstance(kickoff_time, datetime) else parse_user_styled_time(kickoff_time)
-    if dt == datetime.min:
+    if not is_valid_time(dt):
         return False
+    dt = _ensure_utc(dt)
+    now_utc = _ensure_utc(now_dt) if now_dt is not None else get_now_utc()
     try:
         duration_mins = int(duration) if duration else get_match_default_duration_minutes()
     except (ValueError, TypeError):
         duration_mins = get_match_default_duration_minutes()
     end_dt = dt + timedelta(minutes=duration_mins)
-    return now_dt >= end_dt
+    return now_utc >= end_dt
 
 
-def is_match_in_24h_window(kickoff_time: str | datetime, now_dt: datetime, max_hours: float = None) -> bool:
+def is_match_in_24h_window(kickoff_time: str | datetime, now_dt: datetime = None, max_hours: float = None) -> bool:
     """
     Returns True if a match's scheduled kickoff is within max_hours (or in the past/live).
     Returns False if scheduled more than max_hours into the future.
@@ -367,15 +413,17 @@ def is_match_in_24h_window(kickoff_time: str | datetime, now_dt: datetime, max_h
     if not kickoff_time:
         return True
     dt = kickoff_time if isinstance(kickoff_time, datetime) else parse_user_styled_time(kickoff_time)
-    if dt == datetime.min:
+    if not is_valid_time(dt):
         return True
-    time_diff_seconds = (dt - now_dt).total_seconds()
+    dt = _ensure_utc(dt)
+    now_utc = _ensure_utc(now_dt) if now_dt is not None else get_now_utc()
+    time_diff_seconds = (dt - now_utc).total_seconds()
     return time_diff_seconds <= max_hours * 3600
 
 
 def is_match_starting_soon(
     kickoff_time: str | datetime,
-    now_dt: datetime,
+    now_dt: datetime = None,
     status_class: str = "",
     threshold_minutes: int = None
 ) -> bool:
@@ -395,16 +443,44 @@ def is_match_starting_soon(
     if not kickoff_time:
         return False
     dt = kickoff_time if isinstance(kickoff_time, datetime) else parse_user_styled_time(kickoff_time)
-    if dt == datetime.min:
+    if not is_valid_time(dt):
         return False
+    dt = _ensure_utc(dt)
+    now_utc = _ensure_utc(now_dt) if now_dt is not None else get_now_utc()
 
-    time_until_kickoff = (dt - now_dt).total_seconds()
+    time_until_kickoff = (dt - now_utc).total_seconds()
     # Match starting within threshold_minutes (e.g. 60m) or match already kicked off (<= 0)
     return time_until_kickoff <= threshold_minutes * 60
 
+def get_channels_count(channels_raw) -> int:
+    """Extracts channel count from raw list, JSON string, or Base64 payload."""
+    if not channels_raw:
+        return 0
+    if isinstance(channels_raw, list):
+        return len(channels_raw)
+    if isinstance(channels_raw, str):
+        s = str(channels_raw).strip()
+        if not s or s == "--":
+            return 0
+        try:
+            p = json.loads(s)
+            if isinstance(p, list):
+                return len(p)
+        except Exception:
+            pass
+        try:
+            d = base64.b64decode(s).decode("utf-8")
+            p = json.loads(unquote(d))
+            if isinstance(p, list):
+                return len(p)
+        except Exception:
+            pass
+    return 0
+
+
 def get_status_priority(status: str, has_stream: bool = True) -> int:
     """Returns numeric priority for match status. Higher value = higher priority.
-    3: Live matches with an active stream / channel / link.
+    3: Live matches with an active stream / channel.
     2: Live matches without streams ('soon').
     1: Upcoming matches before kickoff.
     0: Finished matches.

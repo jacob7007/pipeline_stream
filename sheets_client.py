@@ -1,17 +1,18 @@
 import os
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timezone
 import gspread
 from google.oauth2.service_account import Credentials
 import logger
 from utils import (
     format_to_human_time,
     parse_user_styled_time,
-    get_now_local,
+    get_now_utc,
     resolve_timezone,
     is_match_expired,
     get_spreadsheet_name,
     get_match_player_url,
+    is_valid_time,
 )
 
 SCOPES = [
@@ -182,7 +183,7 @@ def fetch_matches_cache(client, spreadsheet_name: str = None) -> dict:
 
 
 def _filter_valid_cache_rows(matches_cache: dict, now: datetime, now_local_str: str) -> list:
-    """Filters out matches expired 3 hours after scheduled end or unbroadcasted ghost matches past kickoff."""
+    """Filters out matches expired 3 hours after scheduled end."""
     valid_cache_rows = []
     for event_id, data in matches_cache.items():
         k_time = data.get("kickoff_time", "")
@@ -192,18 +193,12 @@ def _filter_valid_cache_rows(matches_cache: dict, now: datetime, now_local_str: 
         if is_match_expired(k_time, duration, now, grace_minutes=180):
             continue
 
-        # Prune unbroadcasted ghost matches that have no stream past kickoff + 15 min
-        has_stream = bool(data.get("channels") or data.get("link"))
-        dt_k = parse_user_styled_time(k_time)
-        if not has_stream and dt_k != datetime.min and now >= dt_k + timedelta(minutes=15) and data.get("status_class") != "finished":
-            continue
-
         last_updated_str = data.get("last_updated", "")
         out_time_str = now_local_str
         if last_updated_str:
             try:
                 dt = parse_user_styled_time(last_updated_str)
-                out_time_str = format_to_human_time(dt.isoformat()) if dt != datetime.min else now_local_str
+                out_time_str = format_to_human_time(dt) if is_valid_time(dt) else now_local_str
             except Exception as e:
                 logger.warning(f"Sheets: Failed to parse cache time '{last_updated_str}': {e}")
                 out_time_str = now_local_str
@@ -254,20 +249,15 @@ def save_matches_cache(client, matches_cache: dict, spreadsheet_name: str = None
     except gspread.exceptions.WorksheetNotFound:
         worksheet = sh.add_worksheet(title=sheet_name, rows="1000", cols="14")
 
-    now = get_now_local()
-    now_local_str = format_to_human_time(now.replace(tzinfo=resolve_timezone(None)).isoformat())
+    now = get_now_utc()
+    now_local_str = format_to_human_time(now)
 
-    # Purge expired and ghost matches in-place from the matches_cache dictionary
+    # Purge expired matches in-place from the matches_cache dictionary
     expired_ids = []
     for ev_id, data in matches_cache.items():
         k_time = data.get("kickoff_time", "")
         duration = int(data.get("duration", 180))
         if is_match_expired(k_time, duration, now, grace_minutes=180):
-            expired_ids.append(ev_id)
-            continue
-        has_stream = bool(data.get("channels") or data.get("link"))
-        dt_k = parse_user_styled_time(k_time)
-        if not has_stream and dt_k != datetime.min and now >= dt_k + timedelta(minutes=15) and data.get("status_class") != "finished":
             expired_ids.append(ev_id)
 
     for ev_id in expired_ids:

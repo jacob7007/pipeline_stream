@@ -1,7 +1,7 @@
 import os
 import sys
 import subprocess
-from datetime import datetime
+from datetime import datetime, timezone
 import requests
 
 from utils import (
@@ -101,7 +101,7 @@ def _handle_end_command(arg: str, chat_id: int, bot_token: str, spreadsheet_name
     if event_id in matches_cache:
         matches_cache[event_id].update({
             "status_class": "finished",
-            "last_updated": datetime.now().isoformat()
+            "last_updated": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         })
     else:
         ch_payload = patcher.encode_channels_payload(found_match.get("channels", [])) if found_match.get("channels") else ""
@@ -119,7 +119,7 @@ def _handle_end_command(arg: str, chat_id: int, bot_token: str, spreadsheet_name
             "kickoff_time": kickoff_time,
             "duration": int(found_match.get("duration", 140)),
             "status_class": "finished",
-            "last_updated": datetime.now().isoformat()
+            "last_updated": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         }
     sheets_client.save_matches_cache(clients["sheets"], matches_cache, spreadsheet_name)
 

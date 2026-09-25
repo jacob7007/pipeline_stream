@@ -5,7 +5,7 @@ import requests
 import logger
 import sheets_client
 from scrapers import SCRAPER_PLUGINS
-from utils import DEFAULT_HEADERS, format_to_human_time, get_now_local, resolve_timezone, get_spreadsheet_name
+from utils import DEFAULT_HEADERS, format_to_human_time, resolve_timezone, get_spreadsheet_name
 
 # Build normalized plugin registry supporting PLUGIN_NAME and module name
 PLUGIN_REGISTRY = {}
